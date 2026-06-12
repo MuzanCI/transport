@@ -1,5 +1,6 @@
 pub mod channel;
 pub mod codec;
+pub mod job;
 pub mod mux;
 pub mod runner;
 pub mod worker;

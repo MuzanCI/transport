@@ -1,10 +1,11 @@
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
+use crate::job::{AvailableJob, JobId};
 use crate::mux::Command;
 
 use crate::mux::{Frame, MuxError};
-use crate::worker::WorkerId;
+use crate::worker::{WorkerConfig, WorkerEvent, WorkerId};
 
 pub type ChannelId = uuid::Uuid;
 
@@ -13,63 +14,6 @@ pub enum ChannelType {
     Scheduler,
     Worker,
     Tunnel,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum WorkerEvent {
-    Started,
-    StdoutLine,
-    StderrLine,
-    Exited,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct WorkerConfig {
-    worker_id: u64,
-    repo_owner: String,
-    repo_name: String,
-    commit_sha: String,
-    worker_capacity: u64,
-}
-
-impl WorkerConfig {
-    pub fn worker_id(&self) -> u64 {
-        self.worker_id
-    }
-
-    pub fn repo_owner(&self) -> &str {
-        &self.repo_owner
-    }
-
-    pub fn repo_name(&self) -> &str {
-        &self.repo_name
-    }
-
-    pub fn commit_sha(&self) -> &str {
-        &self.commit_sha
-    }
-
-    pub fn worker_capacity(&self) -> u64 {
-        self.worker_capacity
-    }
-}
-
-pub type JobId = uuid::Uuid;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct AvailableJob {
-    job_id: JobId,
-    runner_capacity_required: u64,
-}
-
-impl AvailableJob {
-    pub fn job_id(&self) -> JobId {
-        self.job_id
-    }
-
-    pub fn runner_capacity_required(&self) -> u64 {
-        self.runner_capacity_required
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -82,6 +26,11 @@ pub enum Message {
         channel_id: ChannelId,
         channel_type: ChannelType,
         buffer_size: usize,
+    },
+
+    /// A control message to close a channel.
+    CloseChannel {
+        channel_id: ChannelId,
     },
 
     /// A control message to acknowledge successful channel open.
@@ -98,16 +47,17 @@ pub enum Message {
     AcquireJobRequest {
         job_id: JobId,
     },
+
     AcquireJobResponse {
         job_id: JobId,
-        result: Result<(), String>,
+        result: Result<WorkerId, String>,
     },
 
-    InitializeWorkerRequest {
+    WorkerConfigRequest {
         worker_id: WorkerId,
     },
 
-    InitializeWorkerResponse(Result<WorkerConfig, String>),
+    WorkerConfigResponse(Result<WorkerConfig, String>),
 
     /// A control message
     /// A lifecycle event for a Worker.
@@ -215,15 +165,30 @@ impl ChannelHandle {
 
 impl Drop for ChannelHandle {
     fn drop(&mut self) {
+        eprintln!(
+            "Dropping channel handle for channel_id: {}",
+            self.channel_id
+        );
         if self.state == ChannelState::Closed {
+            eprintln!(
+                "Channel {} is already closed. No need to send close command.",
+                self.channel_id
+            );
             return;
         }
         self.state = ChannelState::Closed;
 
+        eprintln!("Sending close command for channel_id: {}", self.channel_id);
         // Delete channel from the mux's dispatch table.
-        let _ = self.command_tx.try_send(Command::CloseChannel {
+        let result = self.command_tx.try_send(Command::CloseChannel {
             channel_id: self.channel_id,
         });
+        if let Err(e) = result {
+            eprintln!(
+                "Failed to send close command for channel_id {}: {}",
+                self.channel_id, e
+            );
+        }
     }
 }
 

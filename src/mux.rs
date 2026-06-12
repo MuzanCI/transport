@@ -291,6 +291,9 @@ where
             } => {
                 self.handle_peer_err(channel_id, err).await;
             }
+            Message::CloseChannel { channel_id } => {
+                self.handle_peer_close(channel_id).await;
+            }
             message => {
                 self.dispatch_message(frame.channel_id, message).await;
             }
@@ -419,6 +422,16 @@ where
         }
     }
 
+    async fn handle_peer_close(&mut self, channel_id: ChannelId) {
+        eprintln!("Peer closed channel [{}]", channel_id);
+        if self.channels.remove(&channel_id).is_none() {
+            eprintln!(
+                "Received close channel for unknown channel ID [{}]",
+                channel_id
+            );
+        }
+    }
+
     async fn dispatch_message(&mut self, channel_id: ChannelId, message: Message) {
         match self.channels.get(&channel_id) {
             Some(channel) => {
@@ -482,6 +495,13 @@ where
             }
             Command::CloseChannel { channel_id } => {
                 self.channels.remove(&channel_id);
+                let frame = Frame {
+                    channel_id: uuid::Uuid::nil(),
+                    message: Message::CloseChannel { channel_id },
+                };
+                if let Err(e) = self.framed.send(frame).await {
+                    eprintln!("Failed to send close channel request: {:?}", e);
+                }
             }
         }
     }

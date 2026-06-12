@@ -1,13 +1,11 @@
-pub type WorkerId = u64;
-
-pub type RunnerId = u64;
+pub type WorkerId = uuid::Uuid;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RunnerConfig {
-    /// The runner identifier.
-    runner_id: RunnerId,
+pub struct WorkerConfig {
+    /// The worker identifier.
+    worker_id: WorkerId,
 
-    /// The worker capacity to consume for this runner.
+    /// The worker capacity to consume for this worker.
     worker_capacity: u64,
 
     /// GitHub App installation access token.
@@ -27,9 +25,9 @@ pub struct RunnerConfig {
     exec: String,
 }
 
-impl RunnerConfig {
+impl WorkerConfig {
     pub fn new(
-        runner_id: RunnerId,
+        worker_id: WorkerId,
         worker_capacity: u64,
         access_token: String,
         repo_owner: String,
@@ -37,8 +35,8 @@ impl RunnerConfig {
         commit_sha: String,
         exec: String,
     ) -> Self {
-        RunnerConfig {
-            runner_id,
+        WorkerConfig {
+            worker_id,
             worker_capacity,
             access_token,
             repo_owner,
@@ -48,8 +46,8 @@ impl RunnerConfig {
         }
     }
 
-    pub fn runner_id(&self) -> RunnerId {
-        self.runner_id
+    pub fn worker_id(&self) -> WorkerId {
+        self.worker_id
     }
 
     pub fn worker_capacity(&self) -> u64 {

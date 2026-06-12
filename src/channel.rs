@@ -4,37 +4,37 @@ use tokio::sync::mpsc;
 use crate::mux::Command;
 
 use crate::mux::{Frame, MuxError};
+use crate::worker::WorkerId;
 
 pub type ChannelId = uuid::Uuid;
-pub type WorkerId = u64;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ChannelType {
     Scheduler,
-    Runner,
+    Worker,
     Tunnel,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum RunnerEvent {
-    Started { runner_id: u64 },
-    StdoutLine { runner_id: u64, line: String },
-    StderrLine { runner_id: u64, line: String },
-    Exited { runner_id: u64, exit_code: i32 },
+pub enum WorkerEvent {
+    Started,
+    StdoutLine,
+    StderrLine,
+    Exited,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RunnerConfig {
-    runner_id: u64,
+pub struct WorkerConfig {
+    worker_id: u64,
     repo_owner: String,
     repo_name: String,
     commit_sha: String,
     worker_capacity: u64,
 }
 
-impl RunnerConfig {
-    pub fn runner_id(&self) -> u64 {
-        self.runner_id
+impl WorkerConfig {
+    pub fn worker_id(&self) -> u64 {
+        self.worker_id
     }
 
     pub fn repo_owner(&self) -> &str {
@@ -51,6 +51,24 @@ impl RunnerConfig {
 
     pub fn worker_capacity(&self) -> u64 {
         self.worker_capacity
+    }
+}
+
+pub type JobId = uuid::Uuid;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AvailableJob {
+    job_id: JobId,
+    runner_capacity_required: u64,
+}
+
+impl AvailableJob {
+    pub fn job_id(&self) -> JobId {
+        self.job_id
+    }
+
+    pub fn runner_capacity_required(&self) -> u64 {
+        self.runner_capacity_required
     }
 }
 
@@ -72,15 +90,28 @@ pub enum Message {
         result: Result<(), String>,
     },
 
-    InitializeRunnerRequest {
+    QueryAvailableJobsRequest,
+    QueryAvailableJobsResponse {
+        available_jobs: Vec<AvailableJob>,
+    },
+
+    AcquireJobRequest {
+        job_id: JobId,
+    },
+    AcquireJobResponse {
+        job_id: JobId,
+        result: Result<(), String>,
+    },
+
+    InitializeWorkerRequest {
         worker_id: WorkerId,
     },
 
-    InitializeRunnerResponse(Result<RunnerConfig, String>),
+    InitializeWorkerResponse(Result<WorkerConfig, String>),
 
     /// A control message
-    /// A lifecycle event for a Runner.
-    RunnerEvent(RunnerEvent),
+    /// A lifecycle event for a Worker.
+    WorkerEvent(WorkerEvent),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -198,7 +229,7 @@ impl Drop for ChannelHandle {
 
 /// A function that accepts a channel handle and returns a future that sends
 /// and receives messages on the channel.
-type ChannelFutureFn = dyn FnOnce(ChannelHandle) -> BoxFuture<'static, ()> + Send;
+pub type ChannelFutureFn = dyn FnOnce(ChannelHandle) -> BoxFuture<'static, ()> + Send;
 
 /// Provides an operation to handle a channel open request from the peer.
 pub trait ChannelAcceptor

@@ -4,7 +4,8 @@ use tokio::sync::mpsc;
 use crate::job::{AvailableJob, JobId};
 use crate::mux::Command;
 
-use crate::mux::{Frame, MuxError};
+use crate::codec::Frame;
+use crate::mux::MuxError;
 use crate::worker::{WorkerConfig, WorkerEvent, WorkerId};
 
 pub type ChannelId = uuid::Uuid;

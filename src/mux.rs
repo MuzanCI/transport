@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::codec::Framed;
 
 use crate::channel::ChannelType;
+use crate::codec::Frame;
 use crate::{
     channel::{ChannelAcceptor, ChannelHandle, ChannelId, ChannelState, Message},
     codec::Codec,
@@ -39,17 +40,6 @@ pub enum MuxError {
 
     #[error("Peer failed to open channel: {0}")]
     ChannelOpenPeerFailed(String),
-}
-
-/// A frame of data that contains a message and the channel that it is belongs to.
-/// Frames are sent across the wire and the [`Mux`] task is responsible for dispatching messages to the appropriate channel based on the channel ID in the frame.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Frame {
-    /// The ID of the channel this frame belongs to.
-    pub channel_id: ChannelId,
-
-    /// The message payload.
-    pub message: Message,
 }
 
 /// A command sent to the mux to perform an action, such as opening a channel.

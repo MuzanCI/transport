@@ -1,3 +1,10 @@
+//! A channel is a bidirectional data stream between two peers.
+//! A channel does not support broadcasting. A channel handle should only
+//! have a single owner.
+//!
+//! In some cases, it may be helpful to split the ownership of a channel handle
+//! into a sender and a receiver.
+
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
@@ -12,77 +19,101 @@ pub type ChannelId = uuid::Uuid;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ChannelType {
+    /// A scheduler channel. Initiated by a runner to query and acquire jobs from the server.
     Scheduler,
+
+    /// A worker channel. Initiated by a runner to initialize a worker, send worker lifecycle events, and receive timeout events.
     Worker,
+
+    /// A tunnel channel. Initiated by a server to establish an SSH tunnel to a runner for debugging purposes.
     Tunnel,
 }
 
+/// A message sent between peers on a channel.
+/// Control messages are sent from a [`mux`] task to the peer mux task to manage channels. Control messages are always sent on the control channel ([`uuid::Uuid::nil`]).
+/// Data messages are sent from a channel task to the peer channel task for application data exchange. Data messages are sent on the channel that they belong to.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Message {
-    /// A packet of data.
-    Data(#[serde(with = "serde_bytes")] Vec<u8>),
-
-    /// A control message to open a channel.
+    /// Control message, request.
+    /// Requests the peer mux task to open a channel.
+    /// The peer mux task must be constructed with a [`ChannelAcceptor`] that can handle the [`Message::OpenChannelRequest`] for the requested [`ChannelType`].
+    /// If the peer mux task accepts the [`Message::OpenChannelRequest`], the peer mux will respond with an [`Message::OpenChannelResponse`] message containing an [`Ok`] result.
+    /// If the peer mux task rejects the [`Message::OpenChannelRequest`], the peer mux will respond with an [`Message::OpenChannelResponse`] message containing an [`Err`] result.
     OpenChannelRequest {
         channel_id: ChannelId,
         channel_type: ChannelType,
         buffer_size: usize,
     },
 
-    /// A control message to close a channel.
-    CloseChannel {
-        channel_id: ChannelId,
-    },
-
-    /// A control message to acknowledge successful channel open.
+    /// Control message, response.
+    /// Response to an [`Message::OpenChannelRequest`].
     OpenChannelResponse {
         channel_id: ChannelId,
         result: Result<(), String>,
     },
 
+    /// Control message, fire-and-forget.
+    /// Requests the peer mux task to close the channel. No response should be expected.
+    CloseChannel { channel_id: ChannelId },
+
+    /// Data message, request, scheduler channel.
+    /// Requests the peer scheduler channel task to query available jobs.
     QueryAvailableJobsRequest,
-    QueryAvailableJobsResponse {
-        available_jobs: Vec<AvailableJob>,
-    },
 
-    AcquireJobRequest {
-        job_id: JobId,
-    },
+    /// Data message, response, scheduler channel.
+    /// Response to a [`Message::QueryAvailableJobsRequest`].
+    QueryAvailableJobsResponse { available_jobs: Vec<AvailableJob> },
 
+    /// Data message, request, scheduler channel.
+    /// Requests the peer scheduler channel task to acquire a job.
+    AcquireJobRequest { job_id: JobId },
+
+    /// Data message, response, scheduler channel.
+    /// Response to an [`Message::AcquireJobRequest`].
     AcquireJobResponse {
         job_id: JobId,
         result: Result<WorkerId, String>,
     },
 
-    WorkerConfigRequest {
-        worker_id: WorkerId,
-    },
+    /// Data message, request, worker channel.
+    /// Requests the peer worker channel task to provide the configuration for a worker.
+    WorkerConfigRequest { worker_id: WorkerId },
 
+    /// Data message, response, worker channel.
+    /// Response to a [`Message::WorkerConfigRequest`].
     WorkerConfigResponse(Result<WorkerConfig, String>),
 
-    /// A lifecycle event for a Worker.
+    /// Data message, fire-and-forget, worker channel.
+    /// Notifies the peer worker channel task about a worker lifecycle event, such as starting or completing a job.
     WorkerEvent(WorkerEvent),
 
+    /// Data message, fire-and-forget, worker channel.
+    /// Notifies the peer worker channel task that the worker has timed out.
     WorkerTimedOut,
 }
 
+/// The state of a channel.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ChannelState {
     Open,
     Closed,
 }
 
+/// A handle to a channel that can be used to send messages to the peer and receive messages from the peer.
+/// The channel handle is owned by a single task.
+/// In some cases, it may be useful to split the ownership of a channel handle into a sender and a receiver.
+/// This can be done using [`ChannelHandle::take_message_rx`] to take the message receiver out of the channel handle and give it to another task.
 pub struct ChannelHandle {
     /// The channel's unique identifier.
     channel_id: ChannelId,
 
-    /// A channel for outbound frames, from a local task to the peer.
+    /// A sender for outbound frames, from a local task to the peer task.
     frame_tx: mpsc::Sender<Frame>,
 
-    /// A channel for commands to the mux task, such as closing the channel.
+    /// A sender for commands to the mux task, such as closing the channel.
     command_tx: mpsc::Sender<Command>,
 
-    /// A channel for inbound messages from the peer.
+    /// A receiver for inbound messages from the peer.
     message_rx: Option<mpsc::Receiver<Message>>,
 
     /// The state of the channel.
@@ -90,6 +121,7 @@ pub struct ChannelHandle {
 }
 
 impl ChannelHandle {
+    /// Constructs a new [`ChannelHandle`].
     pub fn new(
         channel_id: ChannelId,
         frame_tx: mpsc::Sender<Frame>,
@@ -106,6 +138,7 @@ impl ChannelHandle {
         }
     }
 
+    /// Sends a [`Message`] to the peer.
     pub async fn send(&self, message: Message) -> Result<(), MuxError> {
         if self.state == ChannelState::Closed {
             return Err(MuxError::ChannelAlreadyClosed(self.channel_id));
@@ -123,7 +156,7 @@ impl ChannelHandle {
     }
 
     /// Receives a [`Message`] from the channel.
-    /// Returns [`None`] if the channel is closed by peer or the [`Mux`] task has terminated.
+    /// Returns [`None`] if the channel has been closed by the peer.
     pub async fn recv(&mut self) -> Option<Message> {
         let message_rx = match self.message_rx.as_mut() {
             Some(rx) => rx,
@@ -135,20 +168,20 @@ impl ChannelHandle {
             }
         };
 
-        let message = match message_rx.recv().await {
-            // Message received.
-            Some(message) => message,
+        match message_rx.recv().await {
+            Some(message) => Some(message),
 
-            // Mux task has terminated.
+            // Local mux task has terminated.
             None => {
                 self.state = ChannelState::Closed;
-                return None;
+                None
             }
-        };
-
-        Some(message)
+        }
     }
 
+    /// Takes the message receiver out of the channel handle and returns it.
+    /// This is useful for transferring the ownership of the message receiver to another task.
+    /// After calling this method, the channel handle can no longer be used to receive messages.
     pub fn take_message_rx(&mut self) -> mpsc::Receiver<Message> {
         match self.message_rx.take() {
             Some(rx) => rx,
@@ -161,21 +194,13 @@ impl ChannelHandle {
         }
     }
 
+    /// Closes the channel. After calling this method, the channel handle can no longer be used to send or receive messages.
     pub async fn close(&mut self) -> Result<(), MuxError> {
         if self.state == ChannelState::Closed {
             return Ok(());
         }
         self.state = ChannelState::Closed;
 
-        // Notify channel peer that the channel is closing.
-        self.command_tx
-            .send(Command::CloseChannel {
-                channel_id: self.channel_id,
-            })
-            .await
-            .map_err(|e| MuxError::MuxTaskTerminated(e.to_string()))?;
-
-        // Delete channel from the mux's dispatch table.
         self.command_tx
             .send(Command::CloseChannel {
                 channel_id: self.channel_id,
@@ -189,25 +214,14 @@ impl ChannelHandle {
 
 impl Drop for ChannelHandle {
     fn drop(&mut self) {
-        eprintln!(
-            "Dropping channel handle for channel_id: {}",
-            self.channel_id
-        );
         if self.state == ChannelState::Closed {
-            eprintln!(
-                "Channel {} is already closed. No need to send close command.",
-                self.channel_id
-            );
             return;
         }
         self.state = ChannelState::Closed;
 
-        eprintln!("Sending close command for channel_id: {}", self.channel_id);
-        // Delete channel from the mux's dispatch table.
-        let result = self.command_tx.try_send(Command::CloseChannel {
+        if let Err(e) = self.command_tx.try_send(Command::CloseChannel {
             channel_id: self.channel_id,
-        });
-        if let Err(e) = result {
+        }) {
             eprintln!(
                 "Failed to send close command for channel_id {}: {}",
                 self.channel_id, e

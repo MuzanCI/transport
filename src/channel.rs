@@ -59,9 +59,10 @@ pub enum Message {
 
     WorkerConfigResponse(Result<WorkerConfig, String>),
 
-    /// A control message
     /// A lifecycle event for a Worker.
     WorkerEvent(WorkerEvent),
+
+    WorkerTimedOut,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -81,7 +82,7 @@ pub struct ChannelHandle {
     command_tx: mpsc::Sender<Command>,
 
     /// A channel for inbound messages from the peer.
-    message_rx: mpsc::Receiver<Message>,
+    message_rx: Option<mpsc::Receiver<Message>>,
 
     /// The state of the channel.
     state: ChannelState,
@@ -99,7 +100,7 @@ impl ChannelHandle {
             channel_id,
             frame_tx,
             command_tx,
-            message_rx,
+            message_rx: Some(message_rx),
             state,
         }
     }
@@ -123,7 +124,17 @@ impl ChannelHandle {
     /// Receives a [`Message`] from the channel.
     /// Returns [`None`] if the channel is closed by peer or the [`Mux`] task has terminated.
     pub async fn recv(&mut self) -> Option<Message> {
-        let message = match self.message_rx.recv().await {
+        let message_rx = match self.message_rx.as_mut() {
+            Some(rx) => rx,
+            None => {
+                panic!(
+                    "Channel {} message receiver is already taken. Channel handle cannot be used to receive messages anymore.",
+                    self.channel_id
+                );
+            }
+        };
+
+        let message = match message_rx.recv().await {
             // Message received.
             Some(message) => message,
 
@@ -135,6 +146,18 @@ impl ChannelHandle {
         };
 
         Some(message)
+    }
+
+    pub fn take_message_rx(&mut self) -> mpsc::Receiver<Message> {
+        match self.message_rx.take() {
+            Some(rx) => rx,
+            None => {
+                panic!(
+                    "Channel {} message receiver is already taken. Cannot be taken again.",
+                    self.channel_id
+                );
+            }
+        }
     }
 
     pub async fn close(&mut self) -> Result<(), MuxError> {

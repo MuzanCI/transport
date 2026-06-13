@@ -346,17 +346,7 @@ impl AsyncWrite for ChannelStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context) -> Poll<io::Result<()>> {
-        eprintln!("poll_shutdown called for channel_id {}", self.channel_id);
-        let frame = Frame {
-            channel_id: uuid::Uuid::nil(), // control channel
-            message: Message::CloseChannel {
-                channel_id: self.channel_id,
-            },
-        };
-        match self.tx.try_send(frame) {
-            Ok(()) | Err(TrySendError::Closed(_)) => Poll::Ready(Ok(())),
-            Err(TrySendError::Full(_)) => Poll::Pending,
-        }
+        Poll::Ready(Ok(()))
     }
 }
 

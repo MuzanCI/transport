@@ -17,3 +17,7 @@ tokio = { version = "1.52.3", features = ["rt", "sync", "macros"] }
 tokio-io = "0.1.13"
 tokio-util = { version = "0.7.18", features = ["codec"] }
 uuid = { version = "1.23.3", features = ["serde", "v7"] }
+
+[lib]
+name = "muzanci_transport"
+path = "src/lib.rs"

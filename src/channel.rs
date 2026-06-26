@@ -14,110 +14,137 @@ use tokio::io::{self, AsyncRead, ReadBuf};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
-use crate::job::{AvailableJob, JobId};
-use crate::mux::Command;
-
 use crate::codec::Frame;
+use crate::mux::Command;
 use crate::mux::MuxError;
-use crate::worker::{WorkerConfig, WorkerEvent, WorkerId};
 
 pub type ChannelId = uuid::Uuid;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ChannelType {
-    /// A scheduler channel. Initiated by a runner to query and acquire jobs from the server.
-    Scheduler,
+    /// An evaluator scheduler channel. Initiated by a runner.
+    EvaluatorScheduler,
 
-    /// A worker channel. Initiated by a runner to initialize a worker, send worker lifecycle events, and receive timeout events.
+    /// An evaluator channel. Initiated by a runner.
+    Evaluator,
+
+    /// A worker scheduler channel. Initiated by a runner.
+    WorkerScheduler,
+
+    /// A worker channel. Initiated by a runner.
     Worker,
 
-    /// A tunnel channel. Initiated by a server to establish an SSH tunnel to a runner for debugging purposes.
+    /// A debugger scheduler channel. Initiated by a runner.
+    DebuggerScheduler,
+
+    /// A debugger channel. Initiated by a runner.
+    Debugger,
+
+    /// A workdir channel. Initiated by a client.
+    Workdir,
+
+    /// A tunnel channel. Initiated by a runner.
     Tunnel,
 }
+
+pub type RawData = Vec<u8>;
 
 /// A message sent between peers on a channel.
 /// Control messages are sent from a [`mux`] task to the peer mux task to manage channels. Control messages are always sent on the control channel ([`uuid::Uuid::nil`]).
 /// Data messages are sent from a channel task to the peer channel task for application data exchange. Data messages are sent on the channel that they belong to.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Message {
-    /// Control message, request.
+    Control(ControlMessage),
+    EvaluatorScheduler(EvaluatorSchedulerMessage),
+    Evaluator(EvaluatorMessage),
+    WorkerScheduler(WorkerSchedulerMessage),
+    Worker(WorkerMessage),
+    DebuggerScheduler(DebuggerSchedulerMessage),
+    Debugger(DebuggerMessage),
+    Workdir(WorkdirMessage),
+    RawData(RawData),
+}
+
+/// Control messages are sent from a [`crate::mux::Mux<Stream, Acceptor>`] task to the peer mux task to manage channels. Control messages are always sent on the control channel ([`uuid::Uuid::nil`]).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum ControlMessage {
     /// Requests the peer mux task to open a channel.
-    /// The peer mux task must be constructed with a [`ChannelAcceptor`] that can handle the [`Message::OpenChannelRequest`] for the requested [`ChannelType`].
-    /// If the peer mux task accepts the [`Message::OpenChannelRequest`], the peer mux will respond with an [`Message::OpenChannelResponse`] message containing an [`Ok`] result.
-    /// If the peer mux task rejects the [`Message::OpenChannelRequest`], the peer mux will respond with an [`Message::OpenChannelResponse`] message containing an [`Err`] result.
+    /// The peer mux task must be constructed with a [`ChannelAcceptor`] that can handle the [`ControlMessage::OpenChannelRequest`] for the requested [`ChannelType`].
+    /// If the peer mux task accepts the [`ControlMessage::OpenChannelRequest`], the peer mux will respond with an [`ControlMessage::OpenChannelResponse`] message containing an [`Ok`] result.
+    /// If the peer mux task rejects the [`ControlMessage::OpenChannelRequest`], the peer mux will respond with an [`ControlMessage::OpenChannelResponse`] message containing an [`Err`] result.
     OpenChannelRequest {
         channel_id: ChannelId,
         channel_type: ChannelType,
         buffer_size: usize,
     },
-
     /// Control message, response.
-    /// Response to an [`Message::OpenChannelRequest`].
+    /// Response to a [`ControlMessage::OpenChannelRequest`].
     OpenChannelResponse {
         channel_id: ChannelId,
         result: Result<(), String>,
     },
-
-    /// Control message, fire-and-forget.
-    /// Requests the peer mux task to close the channel. No response should be expected.
-    CloseChannel { channel_id: ChannelId },
-
-    /// Data message, request, scheduler channel.
-    /// Requests the peer scheduler channel task to query available jobs.
-    QueryAvailableJobsRequest,
-
-    /// Data message, response, scheduler channel.
-    /// Response to a [`Message::QueryAvailableJobsRequest`].
-    QueryAvailableJobsResponse { available_jobs: Vec<AvailableJob> },
-
-    /// Data message, request, scheduler channel.
-    /// Requests the peer scheduler channel task to acquire a job.
-    AcquireJobRequest { job_id: JobId },
-
-    /// Data message, response, scheduler channel.
-    /// Response to an [`Message::AcquireJobRequest`].
-    AcquireJobResponse {
-        job_id: JobId,
-        result: Result<WorkerId, String>,
+    CloseChannel {
+        channel_id: ChannelId,
     },
-
-    /// Data message, request, worker channel.
-    /// Requests the peer worker channel task to provide the configuration for a worker.
-    WorkerConfigRequest { worker_id: WorkerId },
-
-    /// Data message, response, worker channel.
-    /// Response to a [`Message::WorkerConfigRequest`].
-    WorkerConfigResponse(Result<WorkerConfig, String>),
-
-    /// Data message, fire-and-forget, worker channel.
-    /// Notifies the peer worker channel task about a worker lifecycle event, such as starting or completing a job.
-    WorkerEvent(WorkerEvent),
-
-    /// Data message, fire-and-forget, worker channel.
-    /// Notifies the peer worker channel task that the worker has timed out.
-    WorkerTimedOut,
-
-    /// Data message, fire-and-forget, tunnel channel.
-    /// Raw bytes sent from one peer to the other on a tunnel channel.
-    TunnelData(Vec<u8>),
-
-    /// Data message, fire-and-forget, tunnel channel.
-    /// Indicates the end of a tunnel channel.
-    TunnelEof,
 }
 
-/// The state of a channel.
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum ChannelState {
-    Open,
-    Closed,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum EvaluatorSchedulerMessage {
+    FetchWaitingTriggersRequest,
+    FetchWaitingTriggersResponse,
+    ReserveTriggerRequest,
+    ReserveTriggerResponse,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum EvaluatorMessage {
+    StartEvaluationRequest,
+    StartEvaluationResponse,
+    Event,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum WorkerSchedulerMessage {
+    FetchWaitingTasksRequest,
+    FetchWaitingTasksResponse,
+    ReserveTaskRequest,
+    ReserveTaskResponse,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum WorkerMessage {
+    StartAssignmentRequest,
+    StartAssignmentResponse,
+    Event,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum DebuggerSchedulerMessage {
+    FetchWaitingWorkdirsRequest,
+    FetchWaitingWorkdirsResponse,
+    ReserveWorkdirRequest,
+    ReserveWorkdirResponse,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum DebuggerMessage {
+    StartSessionRequest,
+    StartSessionResponse,
+    FinishSessionRequest,
+    FinishSessionResponse,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum WorkdirMessage {
+    CreateWorkdirRequest,
+    CreateWorkdirResponse,
 }
 
 /// A handle to a channel that can be used to send messages to the peer and receive messages from the peer.
 /// The channel handle is owned by a single task.
 /// In some cases, it may be useful to split the ownership of a channel handle into a sender and a receiver.
 /// This can be done using [`ChannelHandle::take_message_rx`] to take the message receiver out of the channel handle and give it to another task.
-pub struct ChannelHandle {
+pub struct ChannelSender {
     /// The channel's unique identifier.
     channel_id: ChannelId,
 
@@ -126,38 +153,41 @@ pub struct ChannelHandle {
 
     /// A sender for commands to the mux task, such as closing the channel.
     command_tx: mpsc::Sender<Command>,
-
-    /// A receiver for inbound messages from the peer.
-    message_rx: Option<mpsc::Receiver<Message>>,
-
-    /// The state of the channel.
-    state: ChannelState,
 }
 
-impl ChannelHandle {
-    /// Constructs a new [`ChannelHandle`].
-    pub fn new(
-        channel_id: ChannelId,
-        frame_tx: mpsc::Sender<Frame>,
-        command_tx: mpsc::Sender<Command>,
-        message_rx: mpsc::Receiver<Message>,
-        state: ChannelState,
-    ) -> Self {
-        ChannelHandle {
-            channel_id,
-            frame_tx,
-            command_tx,
-            message_rx: Some(message_rx),
-            state,
-        }
-    }
+pub struct ChannelReceiver {
+    /// The channel's unique identifier.
+    channel_id: ChannelId,
 
+    /// A receiver for inbound messages from the peer task.
+    message_rx: mpsc::Receiver<Message>,
+
+    /// A sender for commands to the mux task, such as closing the channel.
+    command_tx: mpsc::Sender<Command>,
+}
+
+pub fn channel(
+    channel_id: ChannelId,
+    frame_tx: mpsc::Sender<Frame>,
+    command_tx: mpsc::Sender<Command>,
+    message_rx: mpsc::Receiver<Message>,
+) -> (ChannelSender, ChannelReceiver) {
+    let sender = ChannelSender {
+        channel_id,
+        frame_tx,
+        command_tx: command_tx.clone(),
+    };
+    let receiver = ChannelReceiver {
+        channel_id,
+        message_rx,
+        command_tx,
+    };
+    (sender, receiver)
+}
+
+impl ChannelSender {
     /// Sends a [`Message`] to the peer.
     pub async fn send(&self, message: Message) -> Result<(), MuxError> {
-        if self.state == ChannelState::Closed {
-            return Err(MuxError::ChannelAlreadyClosed(self.channel_id));
-        }
-
         let frame = Frame {
             channel_id: self.channel_id,
             message,
@@ -168,76 +198,36 @@ impl ChannelHandle {
             .await
             .map_err(|e| MuxError::MuxTaskTerminated(e.to_string()))
     }
+}
 
-    /// Receives a [`Message`] from the channel.
-    /// Returns [`None`] if the channel has been closed by the peer.
-    pub async fn recv(&mut self) -> Option<Message> {
-        let message_rx = match self.message_rx.as_mut() {
-            Some(rx) => rx,
-            None => {
-                panic!(
-                    "Channel {} message receiver is already taken. Channel handle cannot be used to receive messages anymore.",
-                    self.channel_id
-                );
-            }
-        };
-
-        match message_rx.recv().await {
-            Some(message) => Some(message),
-
-            // Local mux task has terminated.
-            None => {
-                self.state = ChannelState::Closed;
-                None
-            }
+impl Drop for ChannelSender {
+    fn drop(&mut self) {
+        if let Err(e) = self.command_tx.try_send(Command::CloseChannel {
+            channel_id: self.channel_id,
+        }) {
+            eprintln!(
+                "Failed to send close command for channel_id {}: {}",
+                self.channel_id, e
+            );
         }
-    }
-
-    /// Takes the message receiver out of the channel handle and returns it.
-    /// This is useful for transferring the ownership of the message receiver to another task.
-    /// After calling this method, the channel handle can no longer be used to receive messages.
-    /// TODO: Clean-up the sender-receiver split. The .take() approach is janky and error-prone.
-    pub fn take_message_rx(&mut self) -> mpsc::Receiver<Message> {
-        match self.message_rx.take() {
-            Some(rx) => rx,
-            None => {
-                panic!(
-                    "Channel {} message receiver is already taken. Cannot be taken again.",
-                    self.channel_id
-                );
-            }
-        }
-    }
-
-    /// Closes the channel. After calling this method, the channel handle can no longer be used to send or receive messages.
-    pub async fn close(&mut self) -> Result<(), MuxError> {
-        if self.state == ChannelState::Closed {
-            return Ok(());
-        }
-        self.state = ChannelState::Closed;
-
-        self.command_tx
-            .send(Command::CloseChannel {
-                channel_id: self.channel_id,
-            })
-            .await
-            .map_err(|e| MuxError::MuxTaskTerminated(e.to_string()))?;
-
-        Ok(())
-    }
-
-    pub fn into_stream(self) -> ChannelStream {
-        ChannelStream::new(self)
     }
 }
 
-impl Drop for ChannelHandle {
-    fn drop(&mut self) {
-        if self.state == ChannelState::Closed {
-            return;
-        }
-        self.state = ChannelState::Closed;
+impl ChannelReceiver {
+    /// Receives a [`Message`] from the channel.
+    /// Returns [`None`] if the channel has been closed.
+    pub async fn recv(&mut self) -> Option<Message> {
+        match self.message_rx.recv().await {
+            Some(message) => Some(message),
 
+            // Channel has closed.
+            None => None,
+        }
+    }
+}
+
+impl Drop for ChannelReceiver {
+    fn drop(&mut self) {
         if let Err(e) = self.command_tx.try_send(Command::CloseChannel {
             channel_id: self.channel_id,
         }) {
@@ -250,41 +240,23 @@ impl Drop for ChannelHandle {
 }
 
 pub struct ChannelStream {
-    rx: mpsc::Receiver<Message>,
-    tx: mpsc::Sender<Frame>,
-    channel_id: ChannelId,
+    tx: ChannelSender,
+    rx: ChannelReceiver,
     read_buf: bytes::Bytes, // leftover bytes from a partially consumed Data message
 }
 
 impl ChannelStream {
-    pub fn new(mut handle: ChannelHandle) -> Self {
-        let rx = handle.take_message_rx();
-        let tx = handle.frame_tx.clone();
-        let channel_id = handle.channel_id;
-        handle.state = ChannelState::Closed; // Prevents drop from sending CloseChannel command, since the stream will manage the channel lifecycle now.
-        ChannelStream {
-            rx,
-            tx,
-            channel_id,
-            read_buf: bytes::Bytes::new(),
-        }
-    }
-}
-
-// TODO: Clean-up the into_stream implementations. The override of Drop is janky.
-impl Drop for ChannelStream {
-    fn drop(&mut self) {
-        let frame = Frame {
-            channel_id: uuid::Uuid::nil(), // control channel
-            message: Message::CloseChannel {
-                channel_id: self.channel_id,
-            },
-        };
-        if let Err(e) = self.tx.try_send(frame) {
-            eprintln!(
-                "Failed to send close command for channel_id {}: {}",
-                self.channel_id, e
+    pub fn new(sender: ChannelSender, receiver: ChannelReceiver) -> Self {
+        if sender.channel_id != receiver.channel_id {
+            panic!(
+                "ChannelSender and ChannelReceiver must have the same channel_id. Got {} and {}",
+                sender.channel_id, receiver.channel_id
             );
+        }
+        ChannelStream {
+            tx: sender,
+            rx: receiver,
+            read_buf: bytes::Bytes::new(),
         }
     }
 }
@@ -302,8 +274,8 @@ impl AsyncRead for ChannelStream {
             return Poll::Ready(Ok(()));
         }
         // Poll the mpsc receiver
-        match self.rx.poll_recv(cx) {
-            Poll::Ready(Some(Message::TunnelData(data))) => {
+        match self.rx.message_rx.poll_recv(cx) {
+            Poll::Ready(Some(Message::RawData(data))) => {
                 let n = buf.remaining().min(data.len());
                 buf.put_slice(&data[..n]);
                 if n < data.len() {
@@ -325,10 +297,10 @@ impl AsyncWrite for ChannelStream {
         // Split into ≤4096-byte chunks and send each as a Data frame.
         let chunk = &buf[..buf.len().min(4096)];
         let frame = Frame {
-            channel_id: self.channel_id,
-            message: Message::TunnelData(chunk.to_vec()),
+            channel_id: self.tx.channel_id,
+            message: Message::RawData(chunk.to_vec()),
         };
-        match self.tx.try_send(frame) {
+        match self.tx.frame_tx.try_send(frame) {
             Ok(()) => Poll::Ready(Ok(chunk.len())),
             Err(TrySendError::Full(_)) => {
                 // Register a waker — the simplest approach is to use poll_reserve
@@ -352,7 +324,8 @@ impl AsyncWrite for ChannelStream {
 
 /// A function that accepts a channel handle and returns a future that sends
 /// and receives messages on the channel.
-pub type ChannelFutureFn = dyn FnOnce(ChannelHandle) -> BoxFuture<'static, ()> + Send;
+pub type ChannelFutureFn =
+    dyn FnOnce(ChannelSender, ChannelReceiver) -> BoxFuture<'static, ()> + Send;
 
 /// Provides an operation to handle a channel open request from the peer.
 pub trait ChannelAcceptor
@@ -401,8 +374,8 @@ where
 /// Box::new and Box::pin at every call site.
 pub fn accept<F, Fut>(f: F) -> Box<ChannelFutureFn>
 where
-    F: FnOnce(ChannelHandle) -> Fut + Send + 'static,
+    F: FnOnce(ChannelSender, ChannelReceiver) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    Box::new(move |handle| Box::pin(f(handle)))
+    Box::new(move |tx, rx| Box::pin(f(tx, rx)))
 }

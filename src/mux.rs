@@ -15,9 +15,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::codec::Framed;
 
 use crate::channel::ChannelType;
+use crate::channel::ControlMessage;
+use crate::channel::channel;
 use crate::codec::Frame;
 use crate::{
-    channel::{ChannelAcceptor, ChannelHandle, ChannelId, ChannelState, Message},
+    channel::{ChannelAcceptor, ChannelId, ChannelReceiver, ChannelSender, Message},
     codec::Codec,
 };
 
@@ -74,7 +76,7 @@ impl MuxHandle {
         &self,
         channel_type: ChannelType,
         buffer_size: usize,
-    ) -> Result<ChannelHandle, MuxError> {
+    ) -> Result<(ChannelSender, ChannelReceiver), MuxError> {
         let channel_id = uuid::Uuid::now_v7();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -91,12 +93,11 @@ impl MuxHandle {
             .await
             .map_err(|e| MuxError::MuxTaskTerminated(e.to_string()))??;
 
-        Ok(ChannelHandle::new(
+        Ok(channel(
             channel_id,
             self.frame_tx.clone(),
             self.command_tx.clone(),
             message_rx,
-            ChannelState::Open,
         ))
     }
 
@@ -260,33 +261,42 @@ where
     }
 
     async fn handle_inbound(&mut self, frame: Frame) {
-        match frame.message {
-            Message::OpenChannelRequest {
-                channel_id,
-                channel_type,
-                buffer_size,
-            } => {
-                self.handle_peer_open(channel_id, channel_type, buffer_size)
-                    .await;
+        if frame.channel_id.is_nil() {
+            // Message for control channel.
+            match frame.message {
+                Message::Control(ControlMessage::OpenChannelRequest {
+                    channel_id,
+                    channel_type,
+                    buffer_size,
+                }) => {
+                    self.handle_peer_open(channel_id, channel_type, buffer_size)
+                        .await;
+                }
+                Message::Control(ControlMessage::OpenChannelResponse {
+                    channel_id,
+                    result: Ok(()),
+                }) => {
+                    self.handle_peer_ok(channel_id).await;
+                }
+                Message::Control(ControlMessage::OpenChannelResponse {
+                    channel_id,
+                    result: Err(err),
+                }) => {
+                    self.handle_peer_err(channel_id, err).await;
+                }
+                Message::Control(ControlMessage::CloseChannel { channel_id }) => {
+                    self.handle_peer_close(channel_id).await;
+                }
+                _ => {
+                    panic!(
+                        "Received unexpected message on the control channel: {:?}",
+                        frame.message
+                    );
+                }
             }
-            Message::OpenChannelResponse {
-                channel_id,
-                result: Ok(()),
-            } => {
-                self.handle_peer_ok(channel_id).await;
-            }
-            Message::OpenChannelResponse {
-                channel_id,
-                result: Err(err),
-            } => {
-                self.handle_peer_err(channel_id, err).await;
-            }
-            Message::CloseChannel { channel_id } => {
-                self.handle_peer_close(channel_id).await;
-            }
-            message => {
-                self.dispatch_message(frame.channel_id, message).await;
-            }
+        } else {
+            // Message for non-control channel.
+            self.dispatch_message(frame.channel_id, frame.message).await;
         }
     }
 
@@ -305,10 +315,10 @@ where
 
             let frame = Frame {
                 channel_id: uuid::Uuid::nil(),
-                message: Message::OpenChannelResponse {
+                message: Message::Control(ControlMessage::OpenChannelResponse {
                     channel_id,
                     result: Err("Channel ID already exists".to_string()),
-                },
+                }),
             };
             if let Err(e) = self.framed.send(frame).await {
                 eprintln!("Failed to send open channel response: {:?}", e);
@@ -323,10 +333,10 @@ where
             );
             let frame = Frame {
                 channel_id: uuid::Uuid::nil(),
-                message: Message::OpenChannelResponse {
+                message: Message::Control(ControlMessage::OpenChannelResponse {
                     channel_id,
                     result: Err("Channel ID already exists".to_string()),
-                },
+                }),
             };
             if let Err(e) = self.framed.send(frame).await {
                 eprintln!("Failed to send open channel response: {:?}", e);
@@ -340,10 +350,10 @@ where
                 eprintln!("Failed to accept open channel request: {}", err);
                 let frame = Frame {
                     channel_id: uuid::Uuid::nil(),
-                    message: Message::OpenChannelResponse {
+                    message: Message::Control(ControlMessage::OpenChannelResponse {
                         channel_id,
                         result: Err(err),
-                    },
+                    }),
                 };
                 if let Err(e) = self.framed.send(frame).await {
                     eprintln!("Failed to send open channel response: {:?}", e);
@@ -357,10 +367,10 @@ where
 
         let frame = Frame {
             channel_id: uuid::Uuid::nil(),
-            message: Message::OpenChannelResponse {
+            message: Message::Control(ControlMessage::OpenChannelResponse {
                 channel_id,
                 result: Ok(()),
-            },
+            }),
         };
         if let Err(e) = self.framed.send(frame).await {
             eprintln!("Failed to send open channel ack: {:?}", e);
@@ -368,15 +378,14 @@ where
             return;
         }
 
-        let channel_handle = ChannelHandle::new(
+        let (tx, rx) = channel(
             channel_id,
             self.frame_tx.clone(),
             self.command_tx.clone(),
             message_rx,
-            ChannelState::Open,
         );
 
-        tokio::spawn(future_fn(channel_handle));
+        tokio::spawn(future_fn(tx, rx));
     }
 
     async fn handle_peer_ok(&mut self, channel_id: ChannelId) {
@@ -468,11 +477,11 @@ where
 
                 let frame = Frame {
                     channel_id: uuid::Uuid::nil(),
-                    message: Message::OpenChannelRequest {
+                    message: Message::Control(ControlMessage::OpenChannelRequest {
                         channel_id,
                         channel_type,
                         buffer_size,
-                    },
+                    }),
                 };
                 if let Err(e) = self.framed.send(frame).await {
                     eprintln!("Failed to send open channel request: {:?}", e);
@@ -487,7 +496,7 @@ where
                 self.channels.remove(&channel_id);
                 let frame = Frame {
                     channel_id: uuid::Uuid::nil(),
-                    message: Message::CloseChannel { channel_id },
+                    message: Message::Control(ControlMessage::CloseChannel { channel_id }),
                 };
                 if let Err(e) = self.framed.send(frame).await {
                     eprintln!("Failed to send close channel request: {:?}", e);

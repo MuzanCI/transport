@@ -75,7 +75,6 @@ pub enum ControlMessage {
     OpenChannelRequest {
         channel_id: ChannelId,
         channel_type: ChannelType,
-        buffer_size: usize,
     },
     /// Control message, response.
     /// Response to a [`ControlMessage::OpenChannelRequest`].
@@ -91,10 +90,20 @@ pub enum ControlMessage {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum EvaluatorSchedulerMessage {
     FetchWaitingTriggersRequest,
-    FetchWaitingTriggersResponse,
-    ReserveTriggerRequest,
-    ReserveTriggerResponse,
+    FetchWaitingTriggersResponse { triggers: Vec<WaitingTrigger> },
+    ReserveTriggerRequest { trigger_id: TriggerId },
+    ReserveTriggerResponse { evaluation_id: EvaluationId },
 }
+
+pub type TriggerId = uuid::Uuid;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WaitingTrigger {
+    pub trigger_id: TriggerId,
+    pub capacity: u64,
+}
+
+pub type EvaluationId = uuid::Uuid;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum EvaluatorMessage {

@@ -53,7 +53,6 @@ pub enum Command {
     OpenChannel {
         channel_id: ChannelId,
         channel_type: ChannelType,
-        buffer_size: usize,
         reply: oneshot::Sender<Result<mpsc::Receiver<Message>, MuxError>>,
     },
 
@@ -75,7 +74,6 @@ impl MuxHandle {
     pub async fn open_channel(
         &self,
         channel_type: ChannelType,
-        buffer_size: usize,
     ) -> Result<(ChannelSender, ChannelReceiver), MuxError> {
         let channel_id = uuid::Uuid::now_v7();
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -83,7 +81,6 @@ impl MuxHandle {
             .send(Command::OpenChannel {
                 channel_id,
                 channel_type,
-                buffer_size,
                 reply: reply_tx,
             })
             .await
@@ -267,10 +264,8 @@ where
                 Message::Control(ControlMessage::OpenChannelRequest {
                     channel_id,
                     channel_type,
-                    buffer_size,
                 }) => {
-                    self.handle_peer_open(channel_id, channel_type, buffer_size)
-                        .await;
+                    self.handle_peer_open(channel_id, channel_type).await;
                 }
                 Message::Control(ControlMessage::OpenChannelResponse {
                     channel_id,
@@ -300,12 +295,7 @@ where
         }
     }
 
-    async fn handle_peer_open(
-        &mut self,
-        channel_id: ChannelId,
-        channel_type: ChannelType,
-        buffer_size: usize,
-    ) {
+    async fn handle_peer_open(&mut self, channel_id: ChannelId, channel_type: ChannelType) {
         eprintln!("Peer requested to open channel [{}]", channel_id);
         if self.channels.contains_key(&channel_id) {
             eprintln!(
@@ -362,7 +352,8 @@ where
             }
         };
 
-        let (message_tx, message_rx) = mpsc::channel(buffer_size);
+        // TODO: Consider parameterizing the buffer size.
+        let (message_tx, message_rx) = mpsc::channel(1);
         self.channels.insert(channel_id, message_tx);
 
         let frame = Frame {
@@ -452,7 +443,6 @@ where
             Command::OpenChannel {
                 channel_id,
                 channel_type,
-                buffer_size,
                 reply,
             } => {
                 if self.channels.contains_key(&channel_id) {
@@ -465,7 +455,7 @@ where
                     return;
                 }
 
-                let (message_tx, message_rx) = mpsc::channel(buffer_size);
+                let (message_tx, message_rx) = mpsc::channel(1);
                 self.pending_open_channels.insert(
                     channel_id,
                     PendingOpenChannel {
@@ -480,7 +470,6 @@ where
                     message: Message::Control(ControlMessage::OpenChannelRequest {
                         channel_id,
                         channel_type,
-                        buffer_size,
                     }),
                 };
                 if let Err(e) = self.framed.send(frame).await {

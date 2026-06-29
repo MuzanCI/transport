@@ -8,6 +8,9 @@
 //! - Receiving frames from the underlying data stream, decoding them, and forwarding messages to the appropriate channel handle.
 //! - Forwards messages from channel handles to the underlying data stream, encoding them as frames.
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use futures_util::SinkExt;
 use futures_util::StreamExt;
@@ -44,6 +47,11 @@ pub enum MuxError {
     ChannelOpenPeerFailed(String),
 }
 
+struct OpenChannelCommandResult {
+    message_rx: mpsc::Receiver<Message>,
+    closed: Arc<AtomicBool>,
+}
+
 /// A command sent to the mux to perform an action, such as opening a channel.
 /// Commands must be async and replies are sent through a channel, since the mux runs in a single thread and cannot block on a command.
 pub enum Command {
@@ -53,11 +61,17 @@ pub enum Command {
     OpenChannel {
         channel_id: ChannelId,
         channel_type: ChannelType,
-        reply: oneshot::Sender<Result<mpsc::Receiver<Message>, MuxError>>,
+        // [4] Convert to "Peer Channel" oneshot sender.
+        reply: oneshot::Sender<Result<OpenChannelCommandResult, MuxError>>,
     },
 
     /// A command for the mux to close a channel.
     CloseChannel { channel_id: ChannelId },
+}
+
+struct PeerChannel {
+    message_tx: mpsc::Sender<Message>,
+    closed: Arc<AtomicBool>,
 }
 
 /// A handle to a mux.
@@ -75,26 +89,30 @@ impl MuxHandle {
         &self,
         channel_type: ChannelType,
     ) -> Result<(ChannelSender, ChannelReceiver), MuxError> {
+        tracing::info!("Requesting to open channel of type [{:?}]", channel_type);
         let channel_id = uuid::Uuid::now_v7();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(Command::OpenChannel {
                 channel_id,
                 channel_type,
-                reply: reply_tx,
+                reply: reply_tx, // [3] Convert to "Peer Channel" oneshot sender.
             })
             .await
             .map_err(|e| MuxError::MuxTaskTerminated(e.to_string()))?;
 
-        let message_rx = reply_rx
+        // [2] Convert to "Peer Channel".
+        let OpenChannelCommandResult { message_rx, closed } = reply_rx
             .await
             .map_err(|e| MuxError::MuxTaskTerminated(e.to_string()))??;
 
         Ok(channel(
             channel_id,
+            channel_type,
             self.frame_tx.clone(),
             self.command_tx.clone(),
             message_rx,
+            closed,
         ))
     }
 
@@ -121,15 +139,10 @@ impl<T> TokioStream for T where
 {
 }
 
-struct PendingOpenChannel {
+struct PendingOpenChannelCommand {
     /// A channel to receive the response from the peer for an open channel request.
-    reply: oneshot::Sender<Result<mpsc::Receiver<Message>, MuxError>>,
-
-    /// Pre-allocated channel for messages.
-    /// Moved to the mux's dispatch table on peer ack.
-    /// Dropped on peer rejection.
-    message_tx: mpsc::Sender<Message>,
-    message_rx: mpsc::Receiver<Message>,
+    // [6] Convert to "Peer Channel" oneshot sender.
+    reply: oneshot::Sender<Result<OpenChannelCommandResult, MuxError>>,
 }
 
 pub struct Mux<Stream, Acceptor>
@@ -141,8 +154,8 @@ where
     /// Bytes are read and written with automatic frame encoding and decoding.
     framed: Framed<Stream, Codec>,
 
-    /// A dispatch table mapping channel IDs to channels.
-    channels: HashMap<ChannelId, mpsc::Sender<Message>>,
+    /// A dispatch table mapping channel IDs to peer channels.
+    peer_channels: HashMap<ChannelId, PeerChannel>,
 
     /// A receiver for inbound [`Frame`]s from other tasks.
     frame_rx: mpsc::Receiver<Frame>,
@@ -151,7 +164,7 @@ where
     command_rx: mpsc::Receiver<Command>,
 
     /// A mapping of pending open channels that have not yet been acknowledged by the peer.
-    pending_open_channels: HashMap<ChannelId, PendingOpenChannel>,
+    pending_open_channel_commands: HashMap<ChannelId, PendingOpenChannelCommand>,
 
     /// A handler for incoming channel open requests from the peer.
     channel_acceptor: Acceptor,
@@ -175,10 +188,10 @@ where
 
         let mux = Mux {
             framed: Framed::new(stream, Codec::new()),
-            channels: HashMap::new(),
+            peer_channels: HashMap::new(),
             frame_rx,
             command_rx,
-            pending_open_channels: HashMap::new(),
+            pending_open_channel_commands: HashMap::new(),
             channel_acceptor: channel_acceptor,
             command_tx: command_tx.clone(),
             frame_tx: frame_tx.clone(),
@@ -202,7 +215,7 @@ where
                         // Forward frame onto the wire.
                         Some(frame) => {
                             if let Err(e) = self.framed.send(frame).await {
-                                eprintln!("Failed to send frame: {:?}", e);
+                                tracing::error!("Failed to send frame: {:?}", e);
                                 break;
                             }
                         }
@@ -224,7 +237,7 @@ where
 
                         // An error occurred while reading from the stream or decoding a frame.
                         Some(Err(e)) => {
-                            eprintln!("Failed to read frame: {:?}", e);
+                            tracing::error!("Failed to read frame: {:?}", e);
                             break;
                         }
 
@@ -251,9 +264,9 @@ where
             }
         }
 
-        eprintln!(
+        tracing::warn!(
             "Mux task terminating, closing {} channels",
-            self.channels.len()
+            self.peer_channels.len()
         );
     }
 
@@ -296,9 +309,13 @@ where
     }
 
     async fn handle_peer_open(&mut self, channel_id: ChannelId, channel_type: ChannelType) {
-        eprintln!("Peer requested to open channel [{}]", channel_id);
-        if self.channels.contains_key(&channel_id) {
-            eprintln!(
+        tracing::info!(
+            "Received request to open channel type [{:?}] with ID [{}]",
+            channel_type,
+            channel_id
+        );
+        if self.peer_channels.contains_key(&channel_id) {
+            tracing::error!(
                 "Peer requested to open channel with existing channel ID [{}]",
                 channel_id
             );
@@ -311,13 +328,13 @@ where
                 }),
             };
             if let Err(e) = self.framed.send(frame).await {
-                eprintln!("Failed to send open channel response: {:?}", e);
+                tracing::error!("Failed to send open channel response: {:?}", e);
             }
             return;
         }
 
-        if self.pending_open_channels.contains_key(&channel_id) {
-            eprintln!(
+        if self.pending_open_channel_commands.contains_key(&channel_id) {
+            tracing::error!(
                 "Peer requested to open channel with pending channel ID [{}]",
                 channel_id
             );
@@ -329,7 +346,7 @@ where
                 }),
             };
             if let Err(e) = self.framed.send(frame).await {
-                eprintln!("Failed to send open channel response: {:?}", e);
+                tracing::error!("Failed to send open channel response: {:?}", e);
             }
             return;
         }
@@ -337,7 +354,7 @@ where
         let future_fn = match self.channel_acceptor.future_fn(channel_id, channel_type) {
             Ok(future_fn) => future_fn,
             Err(err) => {
-                eprintln!("Failed to accept open channel request: {}", err);
+                tracing::error!("Failed to accept open channel request: {}", err);
                 let frame = Frame {
                     channel_id: uuid::Uuid::nil(),
                     message: Message::Control(ControlMessage::OpenChannelResponse {
@@ -346,7 +363,7 @@ where
                     }),
                 };
                 if let Err(e) = self.framed.send(frame).await {
-                    eprintln!("Failed to send open channel response: {:?}", e);
+                    tracing::error!("Failed to send open channel response: {:?}", e);
                 }
                 return;
             }
@@ -354,7 +371,12 @@ where
 
         // TODO: Consider parameterizing the buffer size.
         let (message_tx, message_rx) = mpsc::channel(1);
-        self.channels.insert(channel_id, message_tx);
+        let closed = Arc::new(AtomicBool::new(false));
+        let peer_channel = PeerChannel {
+            message_tx: message_tx.clone(),
+            closed: closed.clone(),
+        };
+        self.peer_channels.insert(channel_id, peer_channel);
 
         let frame = Frame {
             channel_id: uuid::Uuid::nil(),
@@ -364,30 +386,43 @@ where
             }),
         };
         if let Err(e) = self.framed.send(frame).await {
-            eprintln!("Failed to send open channel ack: {:?}", e);
-            self.channels.remove(&channel_id);
+            tracing::error!("Failed to send open channel ack: {:?}", e);
+            self.peer_channels.remove(&channel_id);
             return;
         }
 
         let (tx, rx) = channel(
             channel_id,
+            channel_type,
             self.frame_tx.clone(),
             self.command_tx.clone(),
             message_rx,
+            closed,
         );
 
         tokio::spawn(future_fn(tx, rx));
     }
 
     async fn handle_peer_ok(&mut self, channel_id: ChannelId) {
-        eprintln!("Peer acknowledged open channel [{}]", channel_id);
-        match self.pending_open_channels.remove(&channel_id) {
+        tracing::info!("Received peer ack for opening channel [{}]", channel_id);
+        match self.pending_open_channel_commands.remove(&channel_id) {
             Some(pending) => {
-                self.channels.insert(channel_id, pending.message_tx);
-                let _ = pending.reply.send(Ok(pending.message_rx));
+                // [7] Convert to "Peer Channel" oneshot sender.
+                let closed = Arc::new(AtomicBool::new(false));
+                let (message_tx, message_rx) = mpsc::channel(1);
+                self.peer_channels.insert(
+                    channel_id,
+                    PeerChannel {
+                        message_tx,
+                        closed: closed.clone(),
+                    },
+                );
+                let _ = pending
+                    .reply
+                    .send(Ok(OpenChannelCommandResult { message_rx, closed }));
             }
             None => {
-                eprintln!(
+                tracing::error!(
                     "Received open channel ack for unknown channel ID [{}]",
                     channel_id
                 );
@@ -396,15 +431,19 @@ where
     }
 
     async fn handle_peer_err(&mut self, channel_id: ChannelId, err: String) {
-        eprintln!("Peer failed to open channel [{}]: {}", channel_id, err);
-        match self.pending_open_channels.remove(&channel_id) {
+        tracing::error!(
+            "Received peer error for opening channel [{}]: {}",
+            channel_id,
+            err
+        );
+        match self.pending_open_channel_commands.remove(&channel_id) {
             Some(pending) => {
                 let _ = pending
                     .reply
                     .send(Err(MuxError::ChannelOpenPeerFailed(err)));
             }
             None => {
-                eprintln!(
+                tracing::error!(
                     "Received open channel error for unknown channel ID [{}]",
                     channel_id
                 );
@@ -413,27 +452,36 @@ where
     }
 
     async fn handle_peer_close(&mut self, channel_id: ChannelId) {
-        eprintln!("Peer closed channel [{}]", channel_id);
-        if self.channels.remove(&channel_id).is_none() {
-            eprintln!(
-                "Received close channel for unknown channel ID [{}]",
-                channel_id
-            );
+        tracing::info!("Received peer close for channel [{}]", channel_id);
+        match self.peer_channels.remove(&channel_id) {
+            Some(peer_channel) => {
+                peer_channel
+                    .closed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                tracing::info!("Closed channel [{}]", channel_id);
+            }
+            None => {
+                tracing::error!(
+                    "Received close channel for unknown channel ID [{}]",
+                    channel_id
+                );
+            }
         }
     }
 
     async fn dispatch_message(&mut self, channel_id: ChannelId, message: Message) {
-        match self.channels.get(&channel_id) {
+        match self.peer_channels.get(&channel_id) {
             Some(channel) => {
-                if let Err(e) = channel.send(message).await {
-                    eprintln!(
+                if let Err(e) = channel.message_tx.send(message).await {
+                    tracing::error!(
                         "Failed to send message to channel [{}]: {:?}",
-                        channel_id, e
+                        channel_id,
+                        e
                     );
                 }
             }
             None => {
-                eprintln!("Received frame for unknown channel ID [{}]", channel_id);
+                tracing::warn!("Received frame for unknown channel ID [{}]", channel_id);
             }
         }
     }
@@ -443,27 +491,20 @@ where
             Command::OpenChannel {
                 channel_id,
                 channel_type,
-                reply,
+                reply, // [5] Convert to "Peer Channel" oneshot sender.
             } => {
-                if self.channels.contains_key(&channel_id) {
+                if self.peer_channels.contains_key(&channel_id) {
                     let _ = reply.send(Err(MuxError::ChannelIdAlreadyExists(channel_id)));
                     return;
                 }
 
-                if self.pending_open_channels.contains_key(&channel_id) {
+                if self.pending_open_channel_commands.contains_key(&channel_id) {
                     let _ = reply.send(Err(MuxError::ChannelIdAlreadyExists(channel_id)));
                     return;
                 }
 
-                let (message_tx, message_rx) = mpsc::channel(1);
-                self.pending_open_channels.insert(
-                    channel_id,
-                    PendingOpenChannel {
-                        reply,
-                        message_tx,
-                        message_rx,
-                    },
-                );
+                self.pending_open_channel_commands
+                    .insert(channel_id, PendingOpenChannelCommand { reply });
 
                 let frame = Frame {
                     channel_id: uuid::Uuid::nil(),
@@ -473,8 +514,8 @@ where
                     }),
                 };
                 if let Err(e) = self.framed.send(frame).await {
-                    eprintln!("Failed to send open channel request: {:?}", e);
-                    if let Some(pending) = self.pending_open_channels.remove(&channel_id) {
+                    tracing::error!("Failed to send open channel request: {:?}", e);
+                    if let Some(pending) = self.pending_open_channel_commands.remove(&channel_id) {
                         let _ = pending
                             .reply
                             .send(Err(MuxError::ChannelOpenRequestFailed(e.to_string())));
@@ -482,14 +523,22 @@ where
                 }
             }
             Command::CloseChannel { channel_id } => {
-                self.channels.remove(&channel_id);
+                if self.peer_channels.remove(&channel_id).is_none() {
+                    tracing::error!(
+                        "Received request to close unknown channel ID [{}]",
+                        channel_id
+                    );
+                    return;
+                }
+
                 let frame = Frame {
                     channel_id: uuid::Uuid::nil(),
                     message: Message::Control(ControlMessage::CloseChannel { channel_id }),
                 };
                 if let Err(e) = self.framed.send(frame).await {
-                    eprintln!("Failed to send close channel request: {:?}", e);
+                    tracing::error!("Failed to send close channel request: {:?}", e);
                 }
+                tracing::info!("Sent close channel request for channel [{}]", channel_id);
             }
         }
     }
@@ -503,6 +552,6 @@ where
     /// The mux is dropped when the mux task terminates.
     /// This causes all ChannelHandle::recv() tasks wake up and returns None.
     fn drop(&mut self) {
-        eprintln!("Mux dropped, closing {} channels", self.channels.len());
+        tracing::info!("Mux dropped, closing {} channels", self.peer_channels.len());
     }
 }

@@ -6,9 +6,12 @@
 //! into a sender and a receiver.
 
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::task::{Context, Poll};
 
 use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWrite;
 use tokio::io::{self, AsyncRead, ReadBuf};
 use tokio::sync::mpsc;
@@ -17,10 +20,11 @@ use tokio::sync::mpsc::error::TrySendError;
 use crate::codec::Frame;
 use crate::mux::Command;
 use crate::mux::MuxError;
+use crate::{Job, Pipeline};
 
 pub type ChannelId = uuid::Uuid;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ChannelType {
     /// An evaluator scheduler channel. Initiated by a runner.
     EvaluatorScheduler,
@@ -52,7 +56,7 @@ pub type RawData = Vec<u8>;
 /// A message sent between peers on a channel.
 /// Control messages are sent from a [`mux`] task to the peer mux task to manage channels. Control messages are always sent on the control channel ([`uuid::Uuid::nil`]).
 /// Data messages are sent from a channel task to the peer channel task for application data exchange. Data messages are sent on the channel that they belong to.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     Control(ControlMessage),
     EvaluatorScheduler(EvaluatorSchedulerMessage),
@@ -66,7 +70,7 @@ pub enum Message {
 }
 
 /// Control messages are sent from a [`crate::mux::Mux<Stream, Acceptor>`] task to the peer mux task to manage channels. Control messages are always sent on the control channel ([`uuid::Uuid::nil`]).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     /// Requests the peer mux task to open a channel.
     /// The peer mux task must be constructed with a [`ChannelAcceptor`] that can handle the [`ControlMessage::OpenChannelRequest`] for the requested [`ChannelType`].
@@ -87,7 +91,7 @@ pub enum ControlMessage {
     },
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorSchedulerMessage {
     FetchWaitingTriggersRequest,
     FetchWaitingTriggersResponse { triggers: Vec<WaitingTrigger> },
@@ -97,7 +101,7 @@ pub enum EvaluatorSchedulerMessage {
 
 pub type TriggerId = uuid::Uuid;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitingTrigger {
     pub trigger_id: TriggerId,
     pub capacity: u64,
@@ -106,14 +110,25 @@ pub struct WaitingTrigger {
 pub type EvaluationId = uuid::Uuid;
 pub type RepoUrl = url::Url;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorMessage {
     StartEvaluationRequest { evaluation_id: EvaluationId },
     StartEvaluationResponse { repo_url: RepoUrl },
-    Event,
+    Event(EvaluationEvent),
+    EndEvaluationRequest,
+    EndEvaluationResponse,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EvaluationEvent {
+    Failed(String),
+    Completed {
+        pipelines: Vec<Pipeline>,
+        jobs: Vec<Job>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerSchedulerMessage {
     FetchWaitingTasksRequest,
     FetchWaitingTasksResponse,
@@ -121,14 +136,14 @@ pub enum WorkerSchedulerMessage {
     ReserveTaskResponse,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerMessage {
     StartAssignmentRequest,
     StartAssignmentResponse,
     Event,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebuggerSchedulerMessage {
     FetchWaitingWorkdirsRequest,
     FetchWaitingWorkdirsResponse,
@@ -136,7 +151,7 @@ pub enum DebuggerSchedulerMessage {
     ReserveWorkdirResponse,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebuggerMessage {
     StartSessionRequest,
     StartSessionResponse,
@@ -144,7 +159,7 @@ pub enum DebuggerMessage {
     FinishSessionResponse,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkdirMessage {
     CreateWorkdirRequest,
     CreateWorkdirResponse,
@@ -158,39 +173,55 @@ pub struct ChannelSender {
     /// The channel's unique identifier.
     channel_id: ChannelId,
 
+    channel_type: ChannelType,
+
     /// A sender for outbound frames, from a local task to the peer task.
     frame_tx: mpsc::Sender<Frame>,
 
     /// A sender for commands to the mux task, such as closing the channel.
     command_tx: mpsc::Sender<Command>,
+
+    /// Whether or not the channel has been closed.
+    closed: Arc<AtomicBool>,
 }
 
 pub struct ChannelReceiver {
     /// The channel's unique identifier.
     channel_id: ChannelId,
 
+    channel_type: ChannelType,
+
     /// A receiver for inbound messages from the peer task.
     message_rx: mpsc::Receiver<Message>,
 
     /// A sender for commands to the mux task, such as closing the channel.
     command_tx: mpsc::Sender<Command>,
+
+    /// Whether or not the channel has been closed.
+    closed: Arc<AtomicBool>,
 }
 
 pub fn channel(
     channel_id: ChannelId,
+    channel_type: ChannelType,
     frame_tx: mpsc::Sender<Frame>,
     command_tx: mpsc::Sender<Command>,
     message_rx: mpsc::Receiver<Message>,
+    closed: Arc<AtomicBool>,
 ) -> (ChannelSender, ChannelReceiver) {
     let sender = ChannelSender {
         channel_id,
+        channel_type,
         frame_tx,
         command_tx: command_tx.clone(),
+        closed: closed.clone(),
     };
     let receiver = ChannelReceiver {
         channel_id,
+        channel_type,
         message_rx,
         command_tx,
+        closed,
     };
     (sender, receiver)
 }
@@ -198,6 +229,10 @@ pub fn channel(
 impl ChannelSender {
     /// Sends a [`Message`] to the peer.
     pub async fn send(&self, message: Message) -> Result<(), MuxError> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(MuxError::ChannelAlreadyClosed(self.channel_id));
+        }
+
         let frame = Frame {
             channel_id: self.channel_id,
             message,
@@ -212,12 +247,30 @@ impl ChannelSender {
 
 impl Drop for ChannelSender {
     fn drop(&mut self) {
+        tracing::info!(
+            "Dropping ChannelSender [{:?}][{}]",
+            self.channel_type,
+            self.channel_id
+        );
+        let closed = self
+            .closed
+            .fetch_or(true, std::sync::atomic::Ordering::SeqCst);
+        if closed {
+            tracing::info!(
+                "ChannelSender [{:?}][{}] already closed, not sending close command",
+                self.channel_type,
+                self.channel_id
+            );
+            return;
+        }
+
         if let Err(e) = self.command_tx.try_send(Command::CloseChannel {
             channel_id: self.channel_id,
         }) {
-            eprintln!(
+            tracing::error!(
                 "Failed to send close command for channel_id {}: {}",
-                self.channel_id, e
+                self.channel_id,
+                e
             );
         }
     }
@@ -227,23 +280,62 @@ impl ChannelReceiver {
     /// Receives a [`Message`] from the channel.
     /// Returns [`None`] if the channel has been closed.
     pub async fn recv(&mut self) -> Option<Message> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!(
+                "ChannelReceiver [{:?}][{}] has been closed, returning None",
+                self.channel_type,
+                self.channel_id
+            );
+            return None;
+        }
+
         match self.message_rx.recv().await {
             Some(message) => Some(message),
 
-            // Channel has closed.
-            None => None,
+            None => {
+                tracing::error!(
+                    "ChannelReceiver [{:?}][{}] has been closed by the peer.",
+                    self.channel_type,
+                    self.channel_id,
+                );
+                None
+            }
         }
     }
 }
 
 impl Drop for ChannelReceiver {
     fn drop(&mut self) {
+        tracing::info!(
+            "Dropping ChannelReceiver [{:?}][{}]",
+            self.channel_type,
+            self.channel_id
+        );
+        let closed = self
+            .closed
+            .fetch_or(true, std::sync::atomic::Ordering::SeqCst);
+
+        if closed {
+            tracing::info!(
+                "ChannelReceiver [{:?}][{}] already closed, not sending close command",
+                self.channel_type,
+                self.channel_id
+            );
+            return;
+        }
+
+        tracing::info!(
+            "ChannelReceiver [{:?}][{}] sending close command.",
+            self.channel_type,
+            self.channel_id
+        );
         if let Err(e) = self.command_tx.try_send(Command::CloseChannel {
             channel_id: self.channel_id,
         }) {
-            eprintln!(
+            tracing::error!(
                 "Failed to send close command for channel_id {}: {}",
-                self.channel_id, e
+                self.channel_id,
+                e
             );
         }
     }

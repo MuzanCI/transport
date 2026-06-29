@@ -16,6 +16,7 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["rt", "sync", "macros"] }
 tokio-io = "0.1.13"
 tokio-util = { version = "0.7.18", features = ["codec"] }
+url = { version = "2.5.8", features = ["serde"] }
 uuid = { version = "1.23.3", features = ["serde", "v7"] }
 
 [lib]

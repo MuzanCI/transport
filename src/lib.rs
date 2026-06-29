@@ -1,6 +1,7 @@
 pub mod channel;
 pub mod codec;
 pub mod mux;
+pub mod pipeline;
 
 /// The HTTP Upgrade header value for the MuzanCI transport protocol.
 pub const MUZANCI_TRANSPORT_V1: &str = "muzanci-transport/v1";

@@ -104,11 +104,12 @@ pub struct WaitingTrigger {
 }
 
 pub type EvaluationId = uuid::Uuid;
+pub type RepoUrl = url::Url;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum EvaluatorMessage {
-    StartEvaluationRequest,
-    StartEvaluationResponse,
+    StartEvaluationRequest { evaluation_id: EvaluationId },
+    StartEvaluationResponse { repo_url: RepoUrl },
     Event,
 }
 

@@ -91,6 +91,16 @@ pub enum ControlMessage {
     },
 }
 
+pub type TriggerId = uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitingTrigger {
+    pub trigger_id: TriggerId,
+    pub capacity: u64,
+}
+
+pub type EvaluationId = uuid::Uuid;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorSchedulerMessage {
     FetchWaitingTriggersRequest,
@@ -105,15 +115,6 @@ pub enum EvaluatorSchedulerMessage {
     },
 }
 
-pub type TriggerId = uuid::Uuid;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WaitingTrigger {
-    pub trigger_id: TriggerId,
-    pub capacity: u64,
-}
-
-pub type EvaluationId = uuid::Uuid;
 pub type RepoUrl = url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,19 +138,47 @@ pub enum EvaluatorMessage {
     FailResponse,
 }
 
+pub type TaskId = uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitingTask {
+    pub task_id: TaskId,
+    pub capacity: u64,
+}
+
+pub type AssignmentId = uuid::Uuid;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerSchedulerMessage {
     FetchWaitingTasksRequest,
-    FetchWaitingTasksResponse,
-    ReserveTaskRequest,
-    ReserveTaskResponse,
+    FetchWaitingTasksResponse {
+        result: Result<Vec<WaitingTask>, String>,
+    },
+    ReserveTaskRequest {
+        task_id: TaskId,
+    },
+    ReserveTaskResponse {
+        result: Result<AssignmentId, String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerMessage {
-    StartAssignmentRequest,
-    StartAssignmentResponse,
-    Event,
+    StartRequest {
+        assignment_id: AssignmentId,
+    },
+    StartResponse {
+        repo_url: RepoUrl,
+    },
+    CompleteRequest {
+        assignment_id: AssignmentId,
+    },
+    CompleteResponse,
+    FailRequest {
+        assignment_id: AssignmentId,
+        reason: String,
+    },
+    FailResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

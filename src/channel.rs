@@ -11,6 +11,7 @@ use std::sync::atomic::AtomicBool;
 use std::task::{Context, Poll};
 
 use futures::future::BoxFuture;
+use muzanci_interpreter::{EvalResult, Job, Pipeline};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWrite;
 use tokio::io::{self, AsyncRead, ReadBuf};
@@ -20,7 +21,6 @@ use tokio::sync::mpsc::error::TrySendError;
 use crate::codec::Frame;
 use crate::mux::Command;
 use crate::mux::MuxError;
-use crate::{Job, Pipeline};
 
 pub type ChannelId = uuid::Uuid;
 
@@ -94,9 +94,15 @@ pub enum ControlMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorSchedulerMessage {
     FetchWaitingTriggersRequest,
-    FetchWaitingTriggersResponse { triggers: Vec<WaitingTrigger> },
-    ReserveTriggerRequest { trigger_id: TriggerId },
-    ReserveTriggerResponse { evaluation_id: EvaluationId },
+    FetchWaitingTriggersResponse {
+        result: Result<Vec<WaitingTrigger>, String>,
+    },
+    ReserveTriggerRequest {
+        trigger_id: TriggerId,
+    },
+    ReserveTriggerResponse {
+        result: Result<EvaluationId, String>,
+    },
 }
 
 pub type TriggerId = uuid::Uuid;
@@ -112,20 +118,23 @@ pub type RepoUrl = url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorMessage {
-    StartEvaluationRequest { evaluation_id: EvaluationId },
-    StartEvaluationResponse { repo_url: RepoUrl },
-    Event(EvaluationEvent),
-    EndEvaluationRequest,
-    EndEvaluationResponse,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EvaluationEvent {
-    Failed(String),
-    Completed {
+    StartRequest {
+        evaluation_id: EvaluationId,
+    },
+    StartResponse {
+        repo_url: RepoUrl,
+    },
+    CompleteRequest {
+        evaluation_id: EvaluationId,
         pipelines: Vec<Pipeline>,
         jobs: Vec<Job>,
     },
+    CompleteResponse,
+    FailRequest {
+        evaluation_id: EvaluationId,
+        reason: String,
+    },
+    FailResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

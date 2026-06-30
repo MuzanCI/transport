@@ -102,8 +102,6 @@ pub struct WaitingTrigger {
     pub capacity: u64,
 }
 
-pub type EvaluatorId = uuid::Uuid;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorSchedulerMessage {
     FetchWaitingTriggersRequest,
@@ -111,10 +109,11 @@ pub enum EvaluatorSchedulerMessage {
         result: Result<Vec<WaitingTrigger>, String>,
     },
     ReserveTriggerRequest {
+        runner_id: RunnerId,
         trigger_id: TriggerId,
     },
     ReserveTriggerResponse {
-        result: Result<EvaluatorId, String>,
+        result: Result<(), String>,
     },
 }
 
@@ -123,13 +122,15 @@ pub type RepoUrl = url::Url;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorMessage {
     StartRequest {
-        evaluator_id: EvaluatorId,
+        runner_id: RunnerId,
+        trigger_id: TriggerId,
     },
     StartResponse {
         result: Result<RepoUrl, String>,
     },
     CompleteRequest {
-        evaluator_id: EvaluatorId,
+        runner_id: RunnerId,
+        trigger_id: TriggerId,
         pipelines: Vec<Pipeline>,
         jobs: Vec<Job>,
     },
@@ -137,7 +138,8 @@ pub enum EvaluatorMessage {
         result: Result<(), String>,
     },
     FailRequest {
-        evaluator_id: EvaluatorId,
+        runner_id: RunnerId,
+        trigger_id: TriggerId,
         reason: String,
     },
     FailResponse {

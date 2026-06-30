@@ -6,12 +6,13 @@
 //! into a sender and a receiver.
 
 use std::pin::Pin;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::task::{Context, Poll};
 
 use futures::future::BoxFuture;
-use muzanci_interpreter::{EvalResult, Job, Pipeline};
+use muzanci_interpreter::{EvalResult, Job, Pipeline, Step, StepId};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWrite;
 use tokio::io::{self, AsyncRead, ReadBuf};
@@ -123,19 +124,23 @@ pub enum EvaluatorMessage {
         evaluation_id: EvaluationId,
     },
     StartResponse {
-        repo_url: RepoUrl,
+        result: Result<RepoUrl, String>,
     },
     CompleteRequest {
         evaluation_id: EvaluationId,
         pipelines: Vec<Pipeline>,
         jobs: Vec<Job>,
     },
-    CompleteResponse,
+    CompleteResponse {
+        result: Result<(), String>,
+    },
     FailRequest {
         evaluation_id: EvaluationId,
         reason: String,
     },
-    FailResponse,
+    FailResponse {
+        result: Result<(), String>,
+    },
 }
 
 pub type TaskId = uuid::Uuid;
@@ -162,23 +167,51 @@ pub enum WorkerSchedulerMessage {
     },
 }
 
+pub type Image = String;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerMessage {
-    StartRequest {
+    StartAssignmentRequest {
         assignment_id: AssignmentId,
     },
-    StartResponse {
-        repo_url: RepoUrl,
+    StartAssignmentResponse {
+        result: Result<Vec<Step>, String>,
     },
-    CompleteRequest {
+    CompleteAssignmentRequest {
         assignment_id: AssignmentId,
     },
-    CompleteResponse,
-    FailRequest {
+    CompleteAssignmentResponse {
+        result: Result<(), String>,
+    },
+    FailAssignmentRequest {
         assignment_id: AssignmentId,
         reason: String,
     },
-    FailResponse,
+    FailAssignmentResponse {
+        result: Result<(), String>,
+    },
+    StartStepRequest {
+        assignment_id: AssignmentId,
+        step_id: StepId,
+    },
+    StartStepResponse {
+        result: Result<Step, String>,
+    },
+    CompleteStepRequest {
+        assignment_id: AssignmentId,
+        step_id: StepId,
+    },
+    CompleteStepResponse {
+        result: Result<(), String>,
+    },
+    FailStepRequest {
+        assignment_id: AssignmentId,
+        step_id: StepId,
+        reason: String,
+    },
+    FailStepResponse {
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

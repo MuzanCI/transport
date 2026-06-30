@@ -92,6 +92,8 @@ pub enum ControlMessage {
     },
 }
 
+pub type RunnerId = uuid::Uuid;
+
 pub type TriggerId = uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +102,7 @@ pub struct WaitingTrigger {
     pub capacity: u64,
 }
 
-pub type EvaluationId = uuid::Uuid;
+pub type EvaluatorId = uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorSchedulerMessage {
@@ -112,7 +114,7 @@ pub enum EvaluatorSchedulerMessage {
         trigger_id: TriggerId,
     },
     ReserveTriggerResponse {
-        result: Result<EvaluationId, String>,
+        result: Result<EvaluatorId, String>,
     },
 }
 
@@ -121,13 +123,13 @@ pub type RepoUrl = url::Url;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorMessage {
     StartRequest {
-        evaluation_id: EvaluationId,
+        evaluator_id: EvaluatorId,
     },
     StartResponse {
         result: Result<RepoUrl, String>,
     },
     CompleteRequest {
-        evaluation_id: EvaluationId,
+        evaluator_id: EvaluatorId,
         pipelines: Vec<Pipeline>,
         jobs: Vec<Job>,
     },
@@ -135,7 +137,7 @@ pub enum EvaluatorMessage {
         result: Result<(), String>,
     },
     FailRequest {
-        evaluation_id: EvaluationId,
+        evaluator_id: EvaluatorId,
         reason: String,
     },
     FailResponse {
@@ -151,61 +153,65 @@ pub struct WaitingTask {
     pub capacity: u64,
 }
 
-pub type AssignmentId = uuid::Uuid;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerSchedulerMessage {
+    // TODO: Enrich fetch with filters like capabilities and capacity.
     FetchWaitingTasksRequest,
     FetchWaitingTasksResponse {
         result: Result<Vec<WaitingTask>, String>,
     },
     ReserveTaskRequest {
+        runner_id: RunnerId,
         task_id: TaskId,
     },
     ReserveTaskResponse {
-        result: Result<AssignmentId, String>,
+        result: Result<(), String>,
     },
 }
 
-pub type Image = String;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerMessage {
-    StartAssignmentRequest {
-        assignment_id: AssignmentId,
+    StartRequest {
+        runner_id: RunnerId,
+        task_id: TaskId,
     },
-    StartAssignmentResponse {
+    StartResponse {
         result: Result<Vec<Step>, String>,
     },
-    CompleteAssignmentRequest {
-        assignment_id: AssignmentId,
+    CompleteRequest {
+        runner_id: RunnerId,
+        task_id: TaskId,
     },
-    CompleteAssignmentResponse {
+    CompleteResponse {
         result: Result<(), String>,
     },
-    FailAssignmentRequest {
-        assignment_id: AssignmentId,
+    FailRequest {
+        runner_id: RunnerId,
+        task_id: TaskId,
         reason: String,
     },
-    FailAssignmentResponse {
+    FailResponse {
         result: Result<(), String>,
     },
     StartStepRequest {
-        assignment_id: AssignmentId,
+        runner_id: RunnerId,
+        task_id: TaskId,
         step_id: StepId,
     },
     StartStepResponse {
-        result: Result<Step, String>,
+        result: Result<(), String>,
     },
     CompleteStepRequest {
-        assignment_id: AssignmentId,
+        runner_id: RunnerId,
+        task_id: TaskId,
         step_id: StepId,
     },
     CompleteStepResponse {
         result: Result<(), String>,
     },
     FailStepRequest {
-        assignment_id: AssignmentId,
+        runner_id: RunnerId,
+        task_id: TaskId,
         step_id: StepId,
         reason: String,
     },

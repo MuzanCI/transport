@@ -119,6 +119,12 @@ pub enum EvaluatorSchedulerMessage {
 
 pub type RepoUrl = url::Url;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProcessOutput {
+    Stdout(String),
+    Stderr(String),
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ExitStatus {
     Code(i32),
@@ -151,17 +157,12 @@ pub enum EvaluatorMessage {
     FailResponse {
         result: Result<(), String>,
     },
-    StdoutLine {
+    ProcessOutput {
         runner_id: RunnerId,
         trigger_id: TriggerId,
-        line: String,
+        output: ProcessOutput,
     },
-    StderrLine {
-        runner_id: RunnerId,
-        trigger_id: TriggerId,
-        line: String,
-    },
-    ExitStatus {
+    ProcessExitStatus {
         runner_id: RunnerId,
         trigger_id: TriggerId,
         exit_status: ExitStatus,
@@ -241,19 +242,13 @@ pub enum WorkerMessage {
     FailStepResponse {
         result: Result<(), String>,
     },
-    StdoutLine {
+    StepProcessOutput {
         runner_id: RunnerId,
         task_id: TaskId,
         step_id: StepId,
-        line: String,
+        output: ProcessOutput,
     },
-    StderrLine {
-        runner_id: RunnerId,
-        task_id: TaskId,
-        step_id: StepId,
-        line: String,
-    },
-    ExitStatus {
+    StepProcessExitStatus {
         runner_id: RunnerId,
         task_id: TaskId,
         step_id: StepId,

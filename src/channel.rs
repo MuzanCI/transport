@@ -119,6 +119,12 @@ pub enum EvaluatorSchedulerMessage {
 
 pub type RepoUrl = url::Url;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ExitStatus {
+    Code(i32),
+    Signal,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorMessage {
     StartRequest {
@@ -144,6 +150,21 @@ pub enum EvaluatorMessage {
     },
     FailResponse {
         result: Result<(), String>,
+    },
+    StdoutLine {
+        runner_id: RunnerId,
+        trigger_id: TriggerId,
+        line: String,
+    },
+    StderrLine {
+        runner_id: RunnerId,
+        trigger_id: TriggerId,
+        line: String,
+    },
+    ExitStatus {
+        runner_id: RunnerId,
+        trigger_id: TriggerId,
+        exit_status: ExitStatus,
     },
 }
 
@@ -220,6 +241,24 @@ pub enum WorkerMessage {
     FailStepResponse {
         result: Result<(), String>,
     },
+    StdoutLine {
+        runner_id: RunnerId,
+        task_id: TaskId,
+        step_id: StepId,
+        line: String,
+    },
+    StderrLine {
+        runner_id: RunnerId,
+        task_id: TaskId,
+        step_id: StepId,
+        line: String,
+    },
+    ExitStatus {
+        runner_id: RunnerId,
+        task_id: TaskId,
+        step_id: StepId,
+        exit_status: ExitStatus,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +287,7 @@ pub enum WorkdirMessage {
 /// The channel handle is owned by a single task.
 /// In some cases, it may be useful to split the ownership of a channel handle into a sender and a receiver.
 /// This can be done using [`ChannelHandle::take_message_rx`] to take the message receiver out of the channel handle and give it to another task.
+#[derive(Debug, Clone)]
 pub struct ChannelSender {
     /// The channel's unique identifier.
     channel_id: ChannelId,

@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::task::{Context, Poll};
 
 use futures::future::BoxFuture;
-use muzanci_interpreter::{EvalResult, Job, Pipeline, Step, StepId};
+use muzanci_interpreter::{EvalResult, Job, JobGraph, Pipeline, Step, StepId};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWrite;
 use tokio::io::{self, AsyncRead, ReadBuf};
@@ -143,8 +143,7 @@ pub enum EvaluatorMessage {
     CompleteRequest {
         runner_id: RunnerId,
         trigger_id: TriggerId,
-        pipelines: Vec<Pipeline>,
-        jobs: Vec<Job>,
+        eval_result: EvalResult,
     },
     CompleteResponse {
         result: Result<(), String>,

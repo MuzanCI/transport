@@ -14,17 +14,21 @@ use std::sync::atomic::Ordering;
 
 use futures_util::SinkExt;
 use futures_util::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_util::codec::Framed;
+use tokio_util::sync::CancellationToken;
 
+use crate::channel::ChannelAcceptor;
+use crate::channel::ChannelId;
+use crate::channel::ChannelReceiver;
+use crate::channel::ChannelSender;
 use crate::channel::ChannelType;
 use crate::channel::ControlMessage;
+use crate::channel::Message;
 use crate::channel::channel;
+use crate::codec::Codec;
 use crate::codec::Frame;
-use crate::{
-    channel::{ChannelAcceptor, ChannelId, ChannelReceiver, ChannelSender, Message},
-    codec::Codec,
-};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MuxError {
@@ -150,6 +154,9 @@ where
     Stream: TokioStream,
     Acceptor: ChannelAcceptor,
 {
+    /// A cancellation token that can be used to cancel the mux task.
+    cancellation_token: CancellationToken,
+
     /// The underlying data stream to the peer, such as a TCP connection.
     /// Bytes are read and written with automatic frame encoding and decoding.
     framed: Framed<Stream, Codec>,
@@ -182,22 +189,31 @@ where
     Acceptor: ChannelAcceptor,
 {
     /// Spawns a new mux task for the given stream and returns a handle to the mux.
-    pub fn spawn(stream: Stream, channel_acceptor: Acceptor) -> MuxHandle {
+    pub fn spawn(
+        stream: Stream,
+        channel_acceptor: Acceptor,
+        cancellation_token: CancellationToken,
+    ) -> MuxHandle {
         let (frame_tx, frame_rx) = mpsc::channel(100);
         let (command_tx, command_rx) = mpsc::channel(100);
 
-        let mux = Mux {
-            framed: Framed::new(stream, Codec::new()),
-            peer_channels: HashMap::new(),
-            frame_rx,
-            command_rx,
-            pending_open_channel_commands: HashMap::new(),
-            channel_acceptor: channel_acceptor,
-            command_tx: command_tx.clone(),
-            frame_tx: frame_tx.clone(),
-        };
-
-        tokio::spawn(mux.run());
+        let mux_frame_tx = frame_tx.clone();
+        let mux_command_tx = command_tx.clone();
+        tokio::spawn(async move {
+            Mux {
+                cancellation_token,
+                framed: Framed::new(stream, Codec::new()),
+                peer_channels: HashMap::new(),
+                frame_rx,
+                command_rx,
+                pending_open_channel_commands: HashMap::new(),
+                channel_acceptor: channel_acceptor,
+                command_tx: mux_command_tx,
+                frame_tx: mux_frame_tx,
+            }
+            .run()
+            .await;
+        });
 
         MuxHandle {
             frame_tx,
@@ -205,8 +221,21 @@ where
         }
     }
 
+    async fn run(&mut self) {
+        tracing::info!("Mux task started.");
+        let cancellation_token = self.cancellation_token.clone();
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                tracing::info!("Mux task received cancellation signal.");
+            }
+            _ = self.main() => {
+                tracing::info!("Mux task finished running.");
+            }
+        }
+    }
+
     /// The main loop of the mux task.
-    async fn run(mut self) {
+    async fn main(&mut self) {
         loop {
             tokio::select! {
                 // -- Data Outbound: Receive frames from other tasks and forward them onto the wire --

@@ -117,7 +117,7 @@ pub enum EvaluatorSchedulerMessage {
     },
 }
 
-pub type RepoUrl = url::Url;
+pub type GitCloneUrl = url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProcessOutput {
@@ -138,7 +138,7 @@ pub enum EvaluatorMessage {
         trigger_id: TriggerId,
     },
     StartResponse {
-        result: Result<RepoUrl, String>,
+        result: Result<GitCloneUrl, String>,
     },
     CompleteRequest {
         runner_id: RunnerId,

@@ -8,16 +8,22 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::task::{Context, Poll};
+use std::task::Context;
+use std::task::Poll;
 
 use futures::future::BoxFuture;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
+use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
-use tokio::io::{self, AsyncRead, ReadBuf};
+use tokio::io::ReadBuf;
+use tokio::io::{self};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
-use muzanci_interpreter::{EvalResult, Step, StepId};
+use muzanci_interpreter::EvalResult;
+use muzanci_interpreter::Step;
+use muzanci_interpreter::StepId;
 
 use crate::codec::Frame;
 use crate::mux::Command;
@@ -121,14 +127,23 @@ pub type GitCloneUrl = url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProcessOutput {
-    Stdout(String),
-    Stderr(String),
+    Stdout { index: usize, line: String },
+    Stderr { index: usize, line: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ExitStatus {
     Code(i32),
     Signal,
+}
+
+impl ToString for ExitStatus {
+    fn to_string(&self) -> String {
+        match *self {
+            ExitStatus::Code(code) => code.to_string(),
+            ExitStatus::Signal => "signal".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -225,12 +225,7 @@ where
         let cancellation_token = self.cancellation_token.clone();
         tokio::select! {
             _ = cancellation_token.cancelled() => {
-                tracing::info!("Mux task received cancellation signal.");
-                // Wait until self.peer_channels and self.pending_open_channel_commands is emptied.
-                while !self.peer_channels.is_empty() || !self.pending_open_channel_commands.is_empty() {
-                    tracing::info!("Mux task waiting for {} channels and {} pending open channel commands to close.", self.peer_channels.len(), self.pending_open_channel_commands.len());
-                    tokio::task::yield_now().await;
-                }
+                tracing::info!("Mux task cancelled.");
             }
             _ = self.main() => {
                 tracing::info!("Mux task finished running.");
@@ -239,6 +234,7 @@ where
     }
 
     /// The main loop of the mux task.
+    // TODO: Not cancellation safe. If the mux task is cancelled while frames/messages are in-flight, they will be dropped.
     async fn main(&mut self) {
         loop {
             tokio::select! {

@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 use futures_util::SinkExt;
 use futures_util::StreamExt;
@@ -227,6 +226,11 @@ where
         tokio::select! {
             _ = cancellation_token.cancelled() => {
                 tracing::info!("Mux task received cancellation signal.");
+                // Wait until self.peer_channels and self.pending_open_channel_commands is emptied.
+                while !self.peer_channels.is_empty() || !self.pending_open_channel_commands.is_empty() {
+                    tracing::info!("Mux task waiting for {} channels and {} pending open channel commands to close.", self.peer_channels.len(), self.pending_open_channel_commands.len());
+                    tokio::task::yield_now().await;
+                }
             }
             _ = self.main() => {
                 tracing::info!("Mux task finished running.");
@@ -239,8 +243,8 @@ where
         loop {
             tokio::select! {
                 // -- Data Outbound: Receive frames from other tasks and forward them onto the wire --
-                maybe_frame = self.frame_rx.recv() => {
-                    match maybe_frame {
+                frame_opt = self.frame_rx.recv() => {
+                    match frame_opt {
                         // Forward frame onto the wire.
                         Some(frame) => {
                             if let Err(e) = self.framed.send(frame).await {
@@ -257,8 +261,8 @@ where
                 }
 
                 // -- Data Inbound: Handle frames from the wire and dispatch them to the appropriate channel --
-                maybe_frame = self.framed.next() => {
-                    match maybe_frame {
+                frame_opt = self.framed.next() => {
+                    match frame_opt {
                         // Dispatch message to appropriate channel.
                         Some(Ok(frame)) => {
                             self.handle_inbound(frame).await;
@@ -278,8 +282,8 @@ where
                 }
 
                 // -- Command Inbound: Handle commands from other tasks, such as opening and closing channels --
-                maybe_command = self.command_rx.recv() => {
-                    match maybe_command {
+                command_opt = self.command_rx.recv() => {
+                    match command_opt {
                         // Handle command.
                         Some(command) => {
                             self.handle_command(command).await;

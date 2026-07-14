@@ -12,6 +12,7 @@ use std::task::Context;
 use std::task::Poll;
 
 use futures::future::BoxFuture;
+use muzanci_interpreter::Args;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncRead;
@@ -153,7 +154,7 @@ pub enum EvaluatorMessage {
         trigger_id: TriggerId,
     },
     StartResponse {
-        result: Result<GitCloneUrl, String>,
+        result: Result<Args, String>,
     },
     CompleteRequest {
         runner_id: RunnerId,
@@ -373,37 +374,6 @@ impl ChannelSender {
     }
 }
 
-impl Drop for ChannelSender {
-    fn drop(&mut self) {
-        tracing::info!(
-            "Dropping ChannelSender [{:?}][{}]",
-            self.channel_type,
-            self.channel_id
-        );
-        let closed = self
-            .closed
-            .fetch_or(true, std::sync::atomic::Ordering::SeqCst);
-        if closed {
-            tracing::info!(
-                "ChannelSender [{:?}][{}] already closed, not sending close command",
-                self.channel_type,
-                self.channel_id
-            );
-            return;
-        }
-
-        if let Err(e) = self.command_tx.try_send(Command::CloseChannel {
-            channel_id: self.channel_id,
-        }) {
-            tracing::error!(
-                "Failed to send close command for channel_id {}: {}",
-                self.channel_id,
-                e
-            );
-        }
-    }
-}
-
 impl ChannelReceiver {
     /// Receives a [`Message`] from the channel.
     /// Returns [`None`] if the channel has been closed.
@@ -421,11 +391,12 @@ impl ChannelReceiver {
             Some(message) => Some(message),
 
             None => {
-                tracing::error!(
+                tracing::info!(
                     "ChannelReceiver [{:?}][{}] has been closed by the peer.",
                     self.channel_type,
                     self.channel_id,
                 );
+                self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
                 None
             }
         }

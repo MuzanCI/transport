@@ -12,7 +12,6 @@ use std::task::Context;
 use std::task::Poll;
 
 use futures::future::BoxFuture;
-use muzanci_interpreter::Args;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncRead;
@@ -22,8 +21,9 @@ use tokio::io::{self};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
-use muzanci_interpreter::EvalResult;
-use muzanci_interpreter::Step;
+use muzanci_interpreter::Config;
+use muzanci_interpreter::GitCloneShowArgs;
+use muzanci_interpreter::StepConfig;
 use muzanci_interpreter::StepId;
 
 use crate::codec::Frame;
@@ -154,12 +154,12 @@ pub enum EvaluatorMessage {
         trigger_id: TriggerId,
     },
     StartResponse {
-        result: Result<Args, String>,
+        result: Result<GitCloneShowArgs, String>,
     },
     CompleteRequest {
         runner_id: RunnerId,
         trigger_id: TriggerId,
-        eval_result: EvalResult,
+        config: Config,
     },
     CompleteResponse {
         result: Result<(), String>,
@@ -215,7 +215,7 @@ pub enum WorkerMessage {
         task_id: TaskId,
     },
     StartResponse {
-        result: Result<Vec<Step>, String>,
+        result: Result<Vec<StepConfig>, String>,
     },
     CompleteRequest {
         runner_id: RunnerId,

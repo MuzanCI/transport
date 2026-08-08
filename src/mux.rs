@@ -50,7 +50,7 @@ pub enum MuxError {
     ChannelOpenPeerFailed(String),
 }
 
-struct OpenChannelCommandResult {
+pub struct OpenChannelCommandResult {
     message_rx: mpsc::Receiver<Message>,
     closed: Arc<AtomicBool>,
 }

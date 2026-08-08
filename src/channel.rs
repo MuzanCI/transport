@@ -12,6 +12,8 @@ use std::task::Context;
 use std::task::Poll;
 
 use futures::future::BoxFuture;
+use muzanci_image::image::ImagePlatform;
+use muzanci_image::manifest_ref::ManifestRef;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncRead;
@@ -190,6 +192,8 @@ pub type TaskId = uuid::Uuid;
 pub struct WaitingTask {
     pub task_id: TaskId,
     pub capacity: u64,
+    pub manifest_ref: ManifestRef,
+    pub platform: ImagePlatform,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

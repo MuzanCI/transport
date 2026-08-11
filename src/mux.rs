@@ -23,11 +23,11 @@ use crate::channel::ChannelId;
 use crate::channel::ChannelReceiver;
 use crate::channel::ChannelSender;
 use crate::channel::ChannelType;
-use crate::channel::ControlMessage;
-use crate::channel::Message;
 use crate::channel::channel;
 use crate::codec::Codec;
 use crate::codec::Frame;
+use crate::message::ControlMessage;
+use crate::message::Message;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MuxError {

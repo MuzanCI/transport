@@ -1,5 +1,6 @@
 pub mod channel;
 pub mod codec;
+pub mod message;
 pub mod mux;
 
 /// The HTTP Upgrade header value for the MuzanCI transport protocol.

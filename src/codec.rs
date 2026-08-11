@@ -2,10 +2,14 @@
 //! Every frame is prefixed with a length header (2 bytes, big-endian).
 //! The frame body consists of a [`ChannelId`] (16 bytes, UUID) and a [`Message`] (variable length, up to 64 kilobytes).
 
-use bytes::{Buf, BufMut, BytesMut};
-use tokio_util::codec::{Decoder, Encoder};
+use bytes::Buf;
+use bytes::BufMut;
+use bytes::BytesMut;
+use tokio_util::codec::Decoder;
+use tokio_util::codec::Encoder;
 
-use crate::channel::{ChannelId, Message};
+use crate::channel::ChannelId;
+use crate::message::Message;
 
 /// A frame of data that contains a message and the channel that it is belongs to.
 /// Frames are sent across the wire and the [`Mux`] task is responsible for dispatching messages to the appropriate channel based on the channel ID in the frame.

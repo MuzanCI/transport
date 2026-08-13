@@ -48,11 +48,8 @@ pub enum ChannelType {
     /// A debugger channel. Initiated by a runner.
     Debugger,
 
-    /// A workdir channel. Initiated by a client.
-    Workdir,
-
-    /// A tunnel channel. Initiated by a runner.
-    Tunnel,
+    /// A debug client channel. Initiated by a CLI.
+    DebugClient,
 }
 
 /// A handle to a channel that can be used to send messages to the peer and receive messages from the peer.
@@ -201,6 +198,77 @@ impl Drop for ChannelReceiver {
         }
     }
 }
+
+// use bytes::Bytes;
+// use futures_util::StreamExt;
+// use std::io;
+// use std::pin::Pin;
+// use std::task::Context;
+// use std::task::Poll;
+// use tokio::io::AsyncRead;
+// use tokio::io::AsyncWrite;
+// use tokio::sync::mpsc;
+// use tokio_stream::wrappers::ReceiverStream;
+// use tokio_util::io::StreamReader;
+
+// #[derive(Debug, Clone)]
+// pub enum Message {
+//     SshPayload(Vec<u8>),
+//     // Other menu/control variants...
+// }
+
+// /// Writer adapter wrapping an MPSC Sender to implement AsyncWrite
+// pub struct MpscWriter {
+//     tx: mpsc::Sender<Message>,
+// }
+
+// impl AsyncWrite for MpscWriter {
+//     fn poll_write(
+//         self: Pin<&mut Self>,
+//         cx: &mut Context<'_>,
+//         buf: &[u8],
+//     ) -> Poll<io::Result<usize>> {
+//         // Reserve capacity in the channel buffer asynchronously
+//         match self.tx.poll_reserve(cx) {
+//             Poll::Ready(Ok(permit)) => {
+//                 permit.send(Message::SshPayload(buf.to_vec()));
+//                 Poll::Ready(Ok(buf.len()))
+//             }
+//             Poll::Ready(Err(_)) => Poll::Ready(Err(io::Error::new(
+//                 io::ErrorKind::BrokenPipe,
+//                 "MPSC channel closed",
+//             ))),
+//             Poll::Pending => Poll::Pending,
+//         }
+//     }
+
+//     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+//         Poll::Ready(Ok(()))
+//     }
+
+//     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+//         Poll::Ready(Ok(()))
+//     }
+// }
+
+// /// Constructs a combined AsyncRead + AsyncWrite stream backed by MPSC channels
+// pub fn create_mpsc_transport(
+//     tx: mpsc::Sender<Message>,
+//     rx: mpsc::Receiver<Message>,
+// ) -> impl AsyncRead + AsyncWrite + Unpin + Send + 'static {
+//     // Convert Receiver<Message> -> Stream of Bytes -> AsyncRead
+//     let rx_stream = ReceiverStream::new(rx).filter_map(|msg| async move {
+//         match msg {
+//             Message::SshPayload(bytes) => Some(Ok(Bytes::from(bytes))),
+//             _ => None, // Filter out non-SSH menu/control messages
+//         }
+//     });
+//     let async_read = StreamReader::new(rx_stream);
+//     let async_write = MpscWriter { tx };
+
+//     // Combine into a single bi-directional IO object
+//     tokio::io::join(async_read, async_write)
+// }
 
 pub struct ChannelStream {
     tx: ChannelSender,

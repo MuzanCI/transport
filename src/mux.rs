@@ -50,6 +50,7 @@ pub enum MuxError {
     ChannelOpenPeerFailed(String),
 }
 
+#[derive(Debug)]
 pub struct OpenChannelCommandResult {
     message_rx: mpsc::Receiver<Message>,
     closed: Arc<AtomicBool>,
@@ -57,6 +58,7 @@ pub struct OpenChannelCommandResult {
 
 /// A command sent to the mux to perform an action, such as opening a channel.
 /// Commands must be async and replies are sent through a channel, since the mux runs in a single thread and cannot block on a command.
+#[derive(Debug)]
 pub enum Command {
     /// A command for the mux to open a channel.
     /// Upon success, the mux will reply with a `MessageReceiver` for the channel.
@@ -88,6 +90,7 @@ pub struct MuxHandle {
 }
 
 impl MuxHandle {
+    #[tracing::instrument(skip_all)]
     pub async fn open_channel(
         &self,
         channel_type: ChannelType,
@@ -251,6 +254,7 @@ where
 
                         // All senders have been dropped. Terminate the mux task.
                         None => {
+                            tracing::info!("all senders dropped");
                             break;
                         }
                     }
@@ -272,6 +276,7 @@ where
 
                         // The peer has closed the connection. Terminate the mux task.
                         None => {
+                            tracing::info!("peer closed");
                             break;
                         }
                     }
@@ -279,6 +284,7 @@ where
 
                 // -- Command Inbound: Handle commands from other tasks, such as opening and closing channels --
                 command_opt = self.command_rx.recv() => {
+                    tracing::info!("Received command: {:?}", command_opt);
                     match command_opt {
                         // Handle command.
                         Some(command) => {
@@ -286,6 +292,7 @@ where
                         }
                         // All mux handles have been dropped. Terminate the mux task.
                         None => {
+                            tracing::info!("all mux handles dropped");
                             break;
                         }
                     }

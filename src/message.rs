@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
 use muzanci_git::GitBranch;
+use muzanci_git::GitCloneUrl;
 use muzanci_git::GitCommitSha;
+use muzanci_git::GitRemote;
 use muzanci_image::image::ImagePlatform;
 use muzanci_image::manifest_ref::ManifestRef;
+use muzanci_interpreter::JobConfig;
 use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
@@ -25,6 +28,9 @@ pub enum Message {
     Evaluator(EvaluatorMessage),
     WorkerScheduler(WorkerSchedulerMessage),
     Worker(WorkerMessage),
+    DebuggerScheduler(DebuggerSchedulerMessage),
+    Debugger(DebuggerMessage),
+    DebugClient(DebugClientMessage),
     RawData(RawData),
 }
 
@@ -53,8 +59,6 @@ pub enum ControlMessage {
 }
 
 pub type RunnerId = uuid::Uuid;
-
-pub type GitCloneUrl = Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckoutConfig {
@@ -233,4 +237,109 @@ pub enum WorkerMessage {
         step_id: StepId,
         exit_status: ExitStatus,
     },
+}
+
+pub type DebugId = uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitingDebug {
+    pub debug_id: DebugId,
+    pub capacity: u64,
+    pub manifest_ref: ManifestRef,
+    pub platform: ImagePlatform,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DebuggerSchedulerMessage {
+    // TODO: Enrich fetch with filters like capabilities and capacity.
+    FetchWaitingDebugsRequest,
+    FetchWaitingDebugsResponse {
+        result: Result<Vec<WaitingDebug>, String>,
+    },
+    ReserveDebugRequest {
+        runner_id: RunnerId,
+        debug_id: DebugId,
+    },
+    ReserveDebugResponse {
+        result: Result<(), String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DebuggerMessage {
+    StartRequest {
+        runner_id: RunnerId,
+        task_id: TaskId,
+    },
+    StartResponse {
+        result: Result<TaskConfig, String>,
+    },
+    CompleteRequest {
+        runner_id: RunnerId,
+        task_id: TaskId,
+    },
+    CompleteResponse {
+        result: Result<(), String>,
+    },
+    FailRequest {
+        runner_id: RunnerId,
+        task_id: TaskId,
+        reason: String,
+    },
+    FailResponse {
+        result: Result<(), String>,
+    },
+    StartStepRequest {
+        runner_id: RunnerId,
+        task_id: TaskId,
+        step_id: StepId,
+    },
+    StartStepResponse {
+        result: Result<(), String>,
+    },
+    CompleteStepRequest {
+        runner_id: RunnerId,
+        task_id: TaskId,
+        step_id: StepId,
+    },
+    CompleteStepResponse {
+        result: Result<(), String>,
+    },
+    FailStepRequest {
+        runner_id: RunnerId,
+        task_id: TaskId,
+        step_id: StepId,
+        reason: String,
+    },
+    FailStepResponse {
+        result: Result<(), String>,
+    },
+    StepProcessOutput {
+        runner_id: RunnerId,
+        task_id: TaskId,
+        step_id: StepId,
+        output: ProcessOutput,
+    },
+    StepProcessExitStatus {
+        runner_id: RunnerId,
+        task_id: TaskId,
+        step_id: StepId,
+        exit_status: ExitStatus,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugConfig {
+    pub debug_id: DebugId,
+    pub job: JobConfig,
+    pub remote: GitRemote,
+    pub capacity: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DebugClientMessage {
+    CreateDebugRequest { debug_config: DebugConfig },
+    CreateDebugResponse { result: Result<(), String> },
+    ConnectDebuggerRequest,
+    ConnectDebuggerResponse { result: Result<(), String> },
 }

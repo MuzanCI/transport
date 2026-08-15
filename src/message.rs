@@ -267,65 +267,8 @@ pub enum DebuggerSchedulerMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebuggerMessage {
-    StartRequest {
-        runner_id: RunnerId,
-        task_id: TaskId,
-    },
-    StartResponse {
-        result: Result<TaskConfig, String>,
-    },
-    CompleteRequest {
-        runner_id: RunnerId,
-        task_id: TaskId,
-    },
-    CompleteResponse {
-        result: Result<(), String>,
-    },
-    FailRequest {
-        runner_id: RunnerId,
-        task_id: TaskId,
-        reason: String,
-    },
-    FailResponse {
-        result: Result<(), String>,
-    },
-    StartStepRequest {
-        runner_id: RunnerId,
-        task_id: TaskId,
-        step_id: StepId,
-    },
-    StartStepResponse {
-        result: Result<(), String>,
-    },
-    CompleteStepRequest {
-        runner_id: RunnerId,
-        task_id: TaskId,
-        step_id: StepId,
-    },
-    CompleteStepResponse {
-        result: Result<(), String>,
-    },
-    FailStepRequest {
-        runner_id: RunnerId,
-        task_id: TaskId,
-        step_id: StepId,
-        reason: String,
-    },
-    FailStepResponse {
-        result: Result<(), String>,
-    },
-    StepProcessOutput {
-        runner_id: RunnerId,
-        task_id: TaskId,
-        step_id: StepId,
-        output: ProcessOutput,
-    },
-    StepProcessExitStatus {
-        runner_id: RunnerId,
-        task_id: TaskId,
-        step_id: StepId,
-        exit_status: ExitStatus,
-    },
+    ConnectDebugClientRequest { debug_id: DebugId },
+    ConnectDebugClientResponse { result: Result<(), String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,4 +285,20 @@ pub enum DebugClientMessage {
     CreateDebugResponse { result: Result<(), String> },
     ConnectDebuggerRequest,
     ConnectDebuggerResponse { result: Result<(), String> },
+    CreateSandboxRequest,
+    CreateSandboxResponse { result: Result<(), String> },
+    CheckoutBranchRequest { url: Url, branch: GitBranch },
+    CheckoutBranchResponse { result: Result<(), String> },
+    StartDiffUploadRequest,
+    StartDiffUploadResponse { result: Result<(), String> },
+    UploadDiffChunkRequest,
+    UploadDiffChunkResponse { result: Result<(), String> },
+    CompleteDiffUploadRequest,
+    CompleteDiffUploadResponse { result: Result<(), String> },
+    ApplyDiffRequest,
+    ApplyDiffResponse { result: Result<(), String> },
+    StartShellRequest,
+    StartShellResponse { result: Result<(), String> },
+    ExecuteStepRequest { step: StepConfig },
+    ExecuteStepResponse { result: Result<(), String> },
 }

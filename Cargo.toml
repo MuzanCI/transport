@@ -22,6 +22,7 @@ uuid = { version = "1.23.3", features = ["serde", "v7"] }
 muzanci-interpreter = { path = "../muzanci-interpreter" }
 muzanci-image = { path = "../muzanci-image" }
 muzanci-git = { path = "../muzanci-git" }
+tokio-stream = "0.1.19"
 
 [lib]
 name = "muzanci_transport"

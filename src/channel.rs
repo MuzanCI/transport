@@ -11,6 +11,8 @@ use std::sync::atomic::AtomicBool;
 use std::task::Context;
 use std::task::Poll;
 
+use bytes::Bytes;
+use futures::Stream;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde::Serialize;
@@ -19,7 +21,10 @@ use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::io::{self};
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::io::StreamReader;
+use tokio_util::sync::PollSender;
 
 use crate::codec::Frame;
 use crate::message::Message;
@@ -50,6 +55,37 @@ pub enum ChannelType {
 
     /// A debug client channel. Initiated by a CLI.
     DebugClient,
+
+    /// A debug client tunnel channel. Initiated by a CLI.
+    DebugClientTunnel,
+
+    /// A debugger tunnel channel. Initiated by a runner.
+    DebuggerTunnel,
+}
+
+pub fn channel(
+    channel_id: ChannelId,
+    channel_type: ChannelType,
+    frame_tx: mpsc::Sender<Frame>,
+    command_tx: mpsc::Sender<Command>,
+    message_rx: mpsc::Receiver<Message>,
+    closed: Arc<AtomicBool>,
+) -> (ChannelSender, ChannelReceiver) {
+    let sender = ChannelSender {
+        channel_id,
+        channel_type,
+        frame_tx,
+        command_tx: command_tx.clone(),
+        closed: closed.clone(),
+    };
+    let receiver = ChannelReceiver {
+        channel_id,
+        channel_type,
+        message_stream: ReceiverStream::new(message_rx),
+        command_tx: command_tx.clone(),
+        closed: closed.clone(),
+    };
+    (sender, receiver)
 }
 
 /// A handle to a channel that can be used to send messages to the peer and receive messages from the peer.
@@ -73,47 +109,6 @@ pub struct ChannelSender {
     closed: Arc<AtomicBool>,
 }
 
-pub struct ChannelReceiver {
-    /// The channel's unique identifier.
-    channel_id: ChannelId,
-
-    channel_type: ChannelType,
-
-    /// A receiver for inbound messages from the peer task.
-    message_rx: mpsc::Receiver<Message>,
-
-    /// A sender for commands to the mux task, such as closing the channel.
-    command_tx: mpsc::Sender<Command>,
-
-    /// Whether or not the channel has been closed.
-    closed: Arc<AtomicBool>,
-}
-
-pub fn channel(
-    channel_id: ChannelId,
-    channel_type: ChannelType,
-    frame_tx: mpsc::Sender<Frame>,
-    command_tx: mpsc::Sender<Command>,
-    message_rx: mpsc::Receiver<Message>,
-    closed: Arc<AtomicBool>,
-) -> (ChannelSender, ChannelReceiver) {
-    let sender = ChannelSender {
-        channel_id,
-        channel_type,
-        frame_tx,
-        command_tx: command_tx.clone(),
-        closed: closed.clone(),
-    };
-    let receiver = ChannelReceiver {
-        channel_id,
-        channel_type,
-        message_rx,
-        command_tx,
-        closed,
-    };
-    (sender, receiver)
-}
-
 impl ChannelSender {
     /// Sends a [`Message`] to the peer.
     pub async fn send(&self, message: Message) -> Result<(), MuxError> {
@@ -133,6 +128,115 @@ impl ChannelSender {
     }
 }
 
+pub struct ChannelPollSender {
+    /// The channel's unique identifier.
+    channel_id: ChannelId,
+
+    _channel_type: ChannelType,
+
+    /// A sender for outbound frames, from a local task to the peer task.
+    frame_tx: PollSender<Frame>,
+
+    /// A sender for commands to the mux task, such as closing the channel.
+    command_tx: mpsc::Sender<Command>,
+
+    /// Whether or not the channel has been closed.
+    closed: Arc<AtomicBool>,
+}
+
+impl ChannelPollSender {
+    pub fn new(sender: ChannelSender) -> Self {
+        Self {
+            channel_id: sender.channel_id,
+            _channel_type: sender.channel_type,
+            frame_tx: PollSender::new(sender.frame_tx),
+            command_tx: sender.command_tx,
+            closed: sender.closed,
+        }
+    }
+
+    /// Poll-based (synchronous) reservation of a permit to send a message.
+    pub fn poll_reserve(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), MuxError>> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Poll::Ready(Err(MuxError::ChannelAlreadyClosed(self.channel_id)));
+        }
+        match self.frame_tx.poll_reserve(cx) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(MuxError::MuxTaskTerminated(e.to_string()))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    pub fn send_item(&mut self, value: Frame) -> Result<(), MuxError> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(MuxError::ChannelAlreadyClosed(self.channel_id));
+        }
+        self.frame_tx
+            .send_item(value)
+            .map_err(|e| MuxError::MuxTaskTerminated(e.to_string()))
+    }
+}
+
+const MAX_FRAME_SIZE: usize = 1024 * 1024;
+
+impl AsyncWrite for ChannelPollSender {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let n = buf.len().min(MAX_FRAME_SIZE);
+        let channel_id = self.channel_id.clone();
+
+        match self.poll_reserve(cx) {
+            Poll::Ready(Ok(())) => {
+                let frame = Frame {
+                    channel_id,
+                    message: Message::RawData(buf[..n].to_vec()),
+                };
+
+                match self.send_item(frame) {
+                    Ok(_) => Poll::Ready(Ok(n)),
+                    Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+                }
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // mpsc has no internal buffering to flush beyond the channel itself.
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // Half-close: tell the mux task this side is done writing.
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let command = Command::CloseChannel {
+            channel_id: self.channel_id,
+        };
+        let _ = self.command_tx.try_send(command);
+        Poll::Ready(Ok(()))
+    }
+}
+
+pub struct ChannelReceiver {
+    /// The channel's unique identifier.
+    channel_id: ChannelId,
+
+    channel_type: ChannelType,
+
+    /// A receiver for inbound messages from the peer task.
+    message_stream: ReceiverStream<Message>,
+
+    /// A sender for commands to the mux task, such as closing the channel.
+    command_tx: mpsc::Sender<Command>,
+
+    /// Whether or not the channel has been closed.
+    closed: Arc<AtomicBool>,
+}
+
 impl ChannelReceiver {
     /// Receives a [`Message`] from the channel.
     /// Returns [`None`] if the channel has been closed.
@@ -146,7 +250,7 @@ impl ChannelReceiver {
             return None;
         }
 
-        match self.message_rx.recv().await {
+        match self.message_stream.next().await {
             Some(message) => Some(message),
 
             None => {
@@ -158,6 +262,29 @@ impl ChannelReceiver {
                 self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
                 None
             }
+        }
+    }
+}
+
+impl Stream for ChannelReceiver {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.message_stream).poll_next(cx) {
+            Poll::Ready(Some(message)) => match message {
+                Message::RawData(data) => Poll::Ready(Some(Ok(Bytes::from(data)))),
+                _ => Poll::Ready(None),
+            },
+            Poll::Ready(None) => {
+                tracing::info!(
+                    "ChannelReceiver [{:?}][{}] has been closed by the peer.",
+                    self.channel_type,
+                    self.channel_id,
+                );
+                self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -198,6 +325,47 @@ impl Drop for ChannelReceiver {
         }
     }
 }
+
+pub type ChannelByteStream =
+    tokio::io::Join<StreamReader<ChannelReceiver, Bytes>, ChannelPollSender>;
+
+pub fn combine_into_byte_stream(
+    sender: ChannelSender,
+    receiver: ChannelReceiver,
+) -> ChannelByteStream {
+    let async_read = StreamReader::new(receiver);
+    let async_write = ChannelPollSender::new(sender);
+    tokio::io::join(async_read, async_write)
+}
+
+// impl ChannelByteStream {
+//     pub fn new(sender: ChannelSender, receiver: ChannelReceiver) -> Self {
+//         let async_read = StreamReader::new(receiver);
+//         let async_write = ChannelPollSender::new(sender);
+//         let stream = tokio::io::join(async_read, async_write);
+//         Self { stream }
+//     }
+
+//     pub fn as_mut(
+//         &mut self,
+//     ) -> &mut tokio::io::Join<StreamReader<ChannelReceiver, Bytes>, ChannelPollSender> {
+//         &mut self.stream
+//     }
+// }
+
+// pub struct ChannelByteStream {
+//     stream: tokio::io::Join<StreamReader<ChannelReceiver, Bytes>, ChannelPollSender>,
+// }
+
+// impl AsyncRead for ChannelByteStream {
+//     fn poll_read(
+//         self: Pin<&mut Self>,
+//         cx: &mut Context<'_>,
+//         buf: &mut ReadBuf<'_>,
+//     ) -> Poll<Result<(), io::Error>> {
+//         self.stream.poll_read(cx, buf)
+//     }
+// }
 
 // use bytes::Bytes;
 // use futures_util::StreamExt;
@@ -270,88 +438,88 @@ impl Drop for ChannelReceiver {
 //     tokio::io::join(async_read, async_write)
 // }
 
-pub struct ChannelStream {
-    tx: ChannelSender,
-    rx: ChannelReceiver,
-    read_buf: bytes::Bytes, // leftover bytes from a partially consumed Data message
-}
+// pub struct ChannelStream {
+//     tx: ChannelSender,
+//     rx: ChannelReceiver,
+//     read_buf: bytes::Bytes, // leftover bytes from a partially consumed Data message
+// }
 
-impl ChannelStream {
-    pub fn new(sender: ChannelSender, receiver: ChannelReceiver) -> Self {
-        if sender.channel_id != receiver.channel_id {
-            panic!(
-                "ChannelSender and ChannelReceiver must have the same channel_id. Got {} and {}",
-                sender.channel_id, receiver.channel_id
-            );
-        }
-        ChannelStream {
-            tx: sender,
-            rx: receiver,
-            read_buf: bytes::Bytes::new(),
-        }
-    }
-}
+// impl ChannelStream {
+//     pub fn new(sender: ChannelSender, receiver: ChannelReceiver) -> Self {
+//         if sender.channel_id != receiver.channel_id {
+//             panic!(
+//                 "ChannelSender and ChannelReceiver must have the same channel_id. Got {} and {}",
+//                 sender.channel_id, receiver.channel_id
+//             );
+//         }
+//         ChannelStream {
+//             tx: sender,
+//             rx: receiver,
+//             read_buf: bytes::Bytes::new(),
+//         }
+//     }
+// }
 
-impl AsyncRead for ChannelStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context,
-        buf: &mut ReadBuf,
-    ) -> Poll<io::Result<()>> {
-        // Drain read_buf first
-        if !self.read_buf.is_empty() {
-            let n = buf.remaining().min(self.read_buf.len());
-            buf.put_slice(&self.read_buf.split_to(n));
-            return Poll::Ready(Ok(()));
-        }
-        // Poll the mpsc receiver
-        match self.rx.message_rx.poll_recv(cx) {
-            Poll::Ready(Some(Message::RawData(data))) => {
-                let n = buf.remaining().min(data.len());
-                buf.put_slice(&data[..n]);
-                if n < data.len() {
-                    self.read_buf = bytes::Bytes::from(data).slice(n..);
-                }
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(None) => {
-                Poll::Ready(Ok(())) // EOF
-            }
-            Poll::Ready(Some(_)) => Poll::Pending, // control message, skip
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
+// impl AsyncRead for ChannelStream {
+//     fn poll_read(
+//         mut self: Pin<&mut Self>,
+//         cx: &mut Context,
+//         buf: &mut ReadBuf,
+//     ) -> Poll<io::Result<()>> {
+//         // Drain read_buf first
+//         if !self.read_buf.is_empty() {
+//             let n = buf.remaining().min(self.read_buf.len());
+//             buf.put_slice(&self.read_buf.split_to(n));
+//             return Poll::Ready(Ok(()));
+//         }
+//         // Poll the mpsc receiver
+//         match self.rx.message_rx.poll_recv(cx) {
+//             Poll::Ready(Some(Message::RawData(data))) => {
+//                 let n = buf.remaining().min(data.len());
+//                 buf.put_slice(&data[..n]);
+//                 if n < data.len() {
+//                     self.read_buf = bytes::Bytes::from(data).slice(n..);
+//                 }
+//                 Poll::Ready(Ok(()))
+//             }
+//             Poll::Ready(None) => {
+//                 Poll::Ready(Ok(())) // EOF
+//             }
+//             Poll::Ready(Some(_)) => Poll::Pending, // control message, skip
+//             Poll::Pending => Poll::Pending,
+//         }
+//     }
+// }
 
-impl AsyncWrite for ChannelStream {
-    fn poll_write(self: Pin<&mut Self>, _: &mut Context, buf: &[u8]) -> Poll<io::Result<usize>> {
-        // Split into ≤4096-byte chunks and send each as a Data frame.
-        let chunk = &buf[..buf.len().min(4096)];
-        let frame = Frame {
-            channel_id: self.tx.channel_id,
-            message: Message::RawData(chunk.to_vec()),
-        };
-        match self.tx.frame_tx.try_send(frame) {
-            Ok(()) => Poll::Ready(Ok(chunk.len())),
-            Err(TrySendError::Full(_)) => {
-                // Register a waker — the simplest approach is to use poll_reserve
-                // on the Sender (available in Tokio's Sender::reserve)
-                Poll::Pending
-            }
-            Err(TrySendError::Closed(_)) => {
-                Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
-            }
-        }
-    }
+// impl AsyncWrite for ChannelStream {
+//     fn poll_write(self: Pin<&mut Self>, _: &mut Context, buf: &[u8]) -> Poll<io::Result<usize>> {
+//         // Split into ≤4096-byte chunks and send each as a Data frame.
+//         let chunk = &buf[..buf.len().min(4096)];
+//         let frame = Frame {
+//             channel_id: self.tx.channel_id,
+//             message: Message::RawData(chunk.to_vec()),
+//         };
+//         match self.tx.frame_tx.try_send(frame) {
+//             Ok(()) => Poll::Ready(Ok(chunk.len())),
+//             Err(TrySendError::Full(_)) => {
+//                 // Register a waker — the simplest approach is to use poll_reserve
+//                 // on the Sender (available in Tokio's Sender::reserve)
+//                 Poll::Pending
+//             }
+//             Err(TrySendError::Closed(_)) => {
+//                 Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+//             }
+//         }
+//     }
 
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(())) // framed writer handles flushing
-    }
+//     fn poll_flush(self: Pin<&mut Self>, _: &mut Context) -> Poll<io::Result<()>> {
+//         Poll::Ready(Ok(())) // framed writer handles flushing
+//     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
+//     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context) -> Poll<io::Result<()>> {
+//         Poll::Ready(Ok(()))
+//     }
+// }
 
 /// A function that accepts a channel handle and returns a future that sends
 /// and receives messages on the channel.

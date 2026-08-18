@@ -30,7 +30,9 @@ pub enum Message {
     Worker(WorkerMessage),
     DebuggerScheduler(DebuggerSchedulerMessage),
     Debugger(DebuggerMessage),
+    DebuggerTunnel(DebuggerTunnelMessage),
     DebugClient(DebugClientMessage),
+    DebugClientTunnel(DebugClientTunnelMessage),
     RawData(RawData),
 }
 
@@ -297,8 +299,20 @@ pub enum DebugClientMessage {
     CompleteDiffUploadResponse { result: Result<(), String> },
     ApplyDiffRequest,
     ApplyDiffResponse { result: Result<(), String> },
-    StartShellRequest,
+    StartShellRequest { step: StepConfig },
     StartShellResponse { result: Result<(), String> },
     ExecuteStepRequest { step: StepConfig },
     ExecuteStepResponse { result: Result<(), String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DebuggerTunnelMessage {
+    CreateDebugTunnelRequest { debug_id: DebugId },
+    CreateDebugTunnelResponse { result: Result<(), String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DebugClientTunnelMessage {
+    ConnectDebugTunnelRequest { debug_id: DebugId },
+    ConnectDebugTunnelResponse { result: Result<(), String> },
 }

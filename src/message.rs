@@ -1,19 +1,17 @@
-use std::path::PathBuf;
-
-use muzanci_git::GitBranch;
-use muzanci_git::GitCloneUrl;
-use muzanci_git::GitCommitSha;
-use muzanci_git::GitRemote;
-use muzanci_image::image::ImagePlatform;
-use muzanci_image::manifest_ref::ManifestRef;
-use muzanci_interpreter::JobConfig;
 use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
-use muzanci_interpreter::Config;
-use muzanci_interpreter::StepConfig;
-use muzanci_interpreter::StepId;
+use muzanci_config::Config;
+use muzanci_config::StepConfig;
+use muzanci_config::StepId;
+use muzanci_config::config::CheckoutConfig;
+use muzanci_config::config::DebugSessionConfig;
+use muzanci_config::config::DebugSessionId;
+use muzanci_config::config::EvaluationConfig;
+use muzanci_git::GitBranch;
+use muzanci_image::image::ImagePlatform;
+use muzanci_image::manifest_ref::ManifestRef;
 
 use crate::channel::ChannelId;
 use crate::channel::ChannelType;
@@ -31,6 +29,7 @@ pub enum Message {
     DebuggerScheduler(DebuggerSchedulerMessage),
     Debugger(DebuggerMessage),
     DebuggerTunnel(DebuggerTunnelMessage),
+    DebugResolver(DebugResolverMessage),
     DebugClient(DebugClientMessage),
     DebugClientTunnel(DebugClientTunnelMessage),
     RawData(RawData),
@@ -55,19 +54,16 @@ pub enum ControlMessage {
         channel_id: ChannelId,
         result: Result<(), String>,
     },
-    CloseChannel {
+    CloseChannelRequest {
         channel_id: ChannelId,
+    },
+    CloseChannelResponse {
+        channel_id: ChannelId,
+        result: Result<(), String>,
     },
 }
 
 pub type RunnerId = uuid::Uuid;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckoutConfig {
-    pub url: GitCloneUrl,
-    pub branch: GitBranch,
-    pub commit_sha: GitCommitSha,
-}
 
 pub type TriggerId = uuid::Uuid;
 
@@ -111,12 +107,6 @@ impl ToString for ExitStatus {
             ExitStatus::Signal => "signal".to_string(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EvaluationConfig {
-    pub checkout: CheckoutConfig,
-    pub input: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,11 +231,9 @@ pub enum WorkerMessage {
     },
 }
 
-pub type DebugId = uuid::Uuid;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WaitingDebug {
-    pub debug_id: DebugId,
+pub struct WaitingDebugSession {
+    pub debug_session_id: DebugSessionId,
     pub capacity: u64,
     pub manifest_ref: ManifestRef,
     pub platform: ImagePlatform,
@@ -254,39 +242,47 @@ pub struct WaitingDebug {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebuggerSchedulerMessage {
     // TODO: Enrich fetch with filters like capabilities and capacity.
-    FetchWaitingDebugsRequest,
-    FetchWaitingDebugsResponse {
-        result: Result<Vec<WaitingDebug>, String>,
+    FetchWaitingDebugSessionsRequest,
+    FetchWaitingDebugSessionsResponse {
+        result: Result<Vec<WaitingDebugSession>, String>,
     },
-    ReserveDebugRequest {
+    ReserveDebugSessionRequest {
         runner_id: RunnerId,
-        debug_id: DebugId,
+        debug_session_id: DebugSessionId,
     },
-    ReserveDebugResponse {
+    ReserveDebugSessionResponse {
         result: Result<(), String>,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebuggerMessage {
-    ConnectDebugClientRequest { debug_id: DebugId },
-    ConnectDebugClientResponse { result: Result<(), String> },
+    ConnectDebuggerRequest { debug_session_id: DebugSessionId },
+    ConnectDebuggerResponse { result: Result<(), String> },
 }
 
+pub type ServerId = uuid::Uuid;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DebugConfig {
-    pub debug_id: DebugId,
-    pub job: JobConfig,
-    pub remote: GitRemote,
-    pub capacity: u64,
+pub enum DebugResolverMessage {
+    CreateDebugSessionRequest {
+        debug_session_config: DebugSessionConfig,
+    },
+    CreateDebugSessionResponse {
+        result: Result<(), String>,
+    },
+    FindDebuggerRequest {
+        debug_session_id: DebugSessionId,
+    },
+    FindDebuggerResponse {
+        result: Result<ServerId, String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebugClientMessage {
-    CreateDebugRequest { debug_config: DebugConfig },
-    CreateDebugResponse { result: Result<(), String> },
-    ConnectDebuggerRequest,
-    ConnectDebuggerResponse { result: Result<(), String> },
+    ConnectDebugClientRequest { debug_session_id: DebugSessionId },
+    ConnectDebugClientResponse { result: Result<(), String> },
     CreateSandboxRequest,
     CreateSandboxResponse { result: Result<(), String> },
     CheckoutBranchRequest { url: Url, branch: GitBranch },
@@ -307,12 +303,12 @@ pub enum DebugClientMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebuggerTunnelMessage {
-    CreateDebugTunnelRequest { debug_id: DebugId },
+    CreateDebugTunnelRequest { debug_session_id: DebugSessionId },
     CreateDebugTunnelResponse { result: Result<(), String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebugClientTunnelMessage {
-    ConnectDebugTunnelRequest { debug_id: DebugId },
+    ConnectDebugTunnelRequest { debug_session_id: DebugSessionId },
     ConnectDebugTunnelResponse { result: Result<(), String> },
 }

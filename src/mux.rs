@@ -15,6 +15,7 @@ use futures_util::SinkExt;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio_util::codec::Framed;
 use tokio_util::sync::CancellationToken;
 
@@ -192,13 +193,13 @@ where
         stream: Stream,
         channel_acceptor: Acceptor,
         cancellation_token: CancellationToken,
-    ) -> MuxHandle {
+    ) -> (MuxHandle, JoinHandle<()>) {
         let (frame_tx, frame_rx) = mpsc::channel(100);
         let (command_tx, command_rx) = mpsc::channel(100);
 
         let mux_frame_tx = frame_tx.clone();
         let mux_command_tx = command_tx.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             Mux {
                 cancellation_token,
                 framed: Framed::new(stream, Codec::new()),
@@ -206,7 +207,7 @@ where
                 frame_rx,
                 command_rx,
                 pending_open_channel_commands: HashMap::new(),
-                channel_acceptor: channel_acceptor,
+                channel_acceptor,
                 command_tx: mux_command_tx,
                 frame_tx: mux_frame_tx,
             }
@@ -214,10 +215,13 @@ where
             .await;
         });
 
-        MuxHandle {
-            frame_tx,
-            command_tx,
-        }
+        (
+            MuxHandle {
+                frame_tx,
+                command_tx,
+            },
+            handle,
+        )
     }
 
     async fn run(&mut self) {

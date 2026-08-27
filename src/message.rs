@@ -1,3 +1,6 @@
+use muzanci_config::config::ImageConfig;
+use muzanci_git::GitCommitSha;
+use muzanci_git::GitRemote;
 use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
@@ -5,10 +8,9 @@ use url::Url;
 use muzanci_config::Config;
 use muzanci_config::StepConfig;
 use muzanci_config::StepId;
-use muzanci_config::config::CheckoutConfig;
-use muzanci_config::config::DebugSessionConfig;
+use muzanci_config::config::DebugClientConfig;
 use muzanci_config::config::DebugSessionId;
-use muzanci_config::config::EvaluationConfig;
+use muzanci_config::config::TriggerConfig;
 use muzanci_git::GitBranch;
 use muzanci_image::image::ImagePlatform;
 use muzanci_image::manifest_ref::ManifestRef;
@@ -116,7 +118,7 @@ pub enum EvaluatorMessage {
         trigger_id: TriggerId,
     },
     StartResponse {
-        result: Result<EvaluationConfig, String>,
+        result: Result<TriggerConfig, String>,
     },
     CompleteRequest {
         runner_id: RunnerId,
@@ -142,13 +144,13 @@ pub type TaskId = uuid::Uuid;
 pub struct WaitingTask {
     pub task_id: TaskId,
     pub capacity: u64,
-    pub manifest_ref: ManifestRef,
-    pub platform: ImagePlatform,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskConfig {
-    pub checkout_config: CheckoutConfig,
+    pub remote: GitRemote,
+    pub commit_sha: GitCommitSha,
+    pub image: ImageConfig,
     pub steps: Vec<StepConfig>,
 }
 
@@ -234,9 +236,6 @@ pub enum WorkerMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitingDebugSession {
     pub debug_session_id: DebugSessionId,
-    pub capacity: u64,
-    pub manifest_ref: ManifestRef,
-    pub platform: ImagePlatform,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,21 +260,19 @@ pub enum DebuggerMessage {
     ConnectDebuggerResponse { result: Result<(), String> },
 }
 
-pub type ServerId = uuid::Uuid;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebugResolverMessage {
     CreateDebugSessionRequest {
-        debug_session_config: DebugSessionConfig,
+        capacity: u64,
     },
     CreateDebugSessionResponse {
-        result: Result<(), String>,
+        result: Result<DebugSessionId, String>,
     },
-    FindDebuggerRequest {
+    ResolveDebugClientConfigRequest {
         debug_session_id: DebugSessionId,
     },
-    FindDebuggerResponse {
-        result: Result<ServerId, String>,
+    ResolveDebugClientConfigResponse {
+        result: Result<DebugClientConfig, String>,
     },
 }
 
@@ -283,7 +280,7 @@ pub enum DebugResolverMessage {
 pub enum DebugClientMessage {
     ConnectDebugClientRequest { debug_session_id: DebugSessionId },
     ConnectDebugClientResponse { result: Result<(), String> },
-    CreateSandboxRequest,
+    CreateSandboxRequest { image: ImageConfig },
     CreateSandboxResponse { result: Result<(), String> },
     CheckoutBranchRequest { url: Url, branch: GitBranch },
     CheckoutBranchResponse { result: Result<(), String> },

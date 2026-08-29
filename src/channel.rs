@@ -8,6 +8,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 
@@ -26,12 +27,20 @@ use tokio_util::sync::PollSender;
 
 use crate::codec::Frame;
 use crate::message::Message;
-use crate::mux::Command;
-use crate::mux::MuxError;
+use crate::mux2::Command;
+use crate::mux2::MuxError;
 
 pub type ChannelId = uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    strum::EnumString,
+    strum::Display
+)]
 pub enum ChannelType {
     /// An evaluator scheduler channel. Initiated by a runner.
     EvaluatorScheduler,
@@ -79,6 +88,7 @@ pub fn channel(
         command_tx: command_tx.clone(),
         closed: closed.clone(),
     };
+
     let receiver = ChannelReceiver {
         channel_id,
         channel_type,
@@ -86,6 +96,7 @@ pub fn channel(
         command_tx: command_tx.clone(),
         closed: closed.clone(),
     };
+
     (sender, receiver)
 }
 
@@ -113,8 +124,11 @@ pub struct ChannelSender {
 impl ChannelSender {
     /// Sends a [`Message`] to the peer.
     pub async fn send(&self, message: Message) -> Result<(), MuxError> {
-        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(MuxError::ChannelAlreadyClosed(self.channel_id));
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(MuxError(format!(
+                "ChannelSender [{}][{}] attempted to send after channel has closed.",
+                self.channel_type, self.channel_id
+            )));
         }
 
         let frame = Frame {
@@ -122,10 +136,12 @@ impl ChannelSender {
             message,
         };
 
-        self.frame_tx
-            .send(frame)
-            .await
-            .map_err(|e| MuxError::MuxTaskTerminated(e.to_string()))
+        self.frame_tx.send(frame).await.map_err(|e| {
+            MuxError(format!(
+                "ChannelSender [{}][{}] failed to send frame: {}",
+                self.channel_type, self.channel_id, e
+            ))
+        })
     }
 }
 
@@ -133,7 +149,7 @@ pub struct ChannelPollSender {
     /// The channel's unique identifier.
     channel_id: ChannelId,
 
-    _channel_type: ChannelType,
+    channel_type: ChannelType,
 
     /// A sender for outbound frames, from a local task to the peer task.
     frame_tx: PollSender<Frame>,
@@ -149,7 +165,7 @@ impl ChannelPollSender {
     pub fn new(sender: ChannelSender) -> Self {
         Self {
             channel_id: sender.channel_id,
-            _channel_type: sender.channel_type,
+            channel_type: sender.channel_type,
             frame_tx: PollSender::new(sender.frame_tx),
             command_tx: sender.command_tx,
             closed: sender.closed,
@@ -159,22 +175,35 @@ impl ChannelPollSender {
     /// Poll-based (synchronous) reservation of a permit to send a message.
     pub fn poll_reserve(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), MuxError>> {
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Poll::Ready(Err(MuxError::ChannelAlreadyClosed(self.channel_id)));
+            return Poll::Ready(Err(MuxError(format!(
+                "ChannelSender [{}][{}] attempted to poll reserve after channel has closed.",
+                self.channel_type, self.channel_id
+            ))));
         }
+
         match self.frame_tx.poll_reserve(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(MuxError::MuxTaskTerminated(e.to_string()))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(MuxError(format!(
+                "ChannelSender [{}][{}] failed to poll reserve: {}",
+                self.channel_type, self.channel_id, e
+            )))),
             Poll::Pending => Poll::Pending,
         }
     }
 
     pub fn send_item(&mut self, value: Frame) -> Result<(), MuxError> {
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(MuxError::ChannelAlreadyClosed(self.channel_id));
+            return Err(MuxError(format!(
+                "ChannelSender [{}][{}] attempted to send item after channel has closed.",
+                self.channel_type, self.channel_id
+            )));
         }
-        self.frame_tx
-            .send_item(value)
-            .map_err(|e| MuxError::MuxTaskTerminated(e.to_string()))
+        self.frame_tx.send_item(value).map_err(|e| {
+            MuxError(format!(
+                "ChannelSender [{}][{}] failed to send item: {}",
+                self.channel_type, self.channel_id, e
+            ))
+        })
     }
 }
 
@@ -213,11 +242,9 @@ impl AsyncWrite for ChannelPollSender {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         // Half-close: tell the mux task this side is done writing.
-        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
-        let command = Command::CloseChannel {
+        let _ = self.command_tx.send(Command::CloseChannel {
             channel_id: self.channel_id,
-        };
-        let _ = self.command_tx.try_send(command);
+        });
         Poll::Ready(Ok(()))
     }
 }
@@ -242,9 +269,9 @@ impl ChannelReceiver {
     /// Receives a [`Message`] from the channel.
     /// Returns [`None`] if the channel has been closed.
     pub async fn recv(&mut self) -> Option<Message> {
-        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.closed.load(Ordering::SeqCst) {
             tracing::info!(
-                "ChannelReceiver [{:?}][{}] has been closed, returning None",
+                "ChannelReceiver [{:?}][{}] has been closed.",
                 self.channel_type,
                 self.channel_id
             );
@@ -253,14 +280,13 @@ impl ChannelReceiver {
 
         match self.message_stream.next().await {
             Some(message) => Some(message),
-
             None => {
-                tracing::info!(
-                    "ChannelReceiver [{:?}][{}] has been closed by the peer.",
+                tracing::warn!(
+                    "ChannelReceiver [{}][{}] attempted to receive message after mux task has dropped.",
                     self.channel_type,
-                    self.channel_id,
+                    self.channel_id
                 );
-                self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+
                 None
             }
         }
@@ -277,12 +303,12 @@ impl Stream for ChannelReceiver {
                 _ => Poll::Ready(None),
             },
             Poll::Ready(None) => {
-                tracing::info!(
-                    "ChannelReceiver [{:?}][{}] has been closed by the peer.",
+                tracing::warn!(
+                    "ChannelReceiver [{}][{}] attempted to receive message after mux task has dropped.",
                     self.channel_type,
-                    self.channel_id,
+                    self.channel_id
                 );
-                self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
@@ -297,11 +323,12 @@ impl Drop for ChannelReceiver {
             self.channel_type,
             self.channel_id
         );
-        let closed = self
+
+        let already_closed = self
             .closed
             .fetch_or(true, std::sync::atomic::Ordering::SeqCst);
 
-        if closed {
+        if already_closed {
             tracing::info!(
                 "ChannelReceiver [{:?}][{}] already closed, not sending close command",
                 self.channel_type,
@@ -315,6 +342,7 @@ impl Drop for ChannelReceiver {
             self.channel_type,
             self.channel_id
         );
+
         if let Err(e) = self.command_tx.try_send(Command::CloseChannel {
             channel_id: self.channel_id,
         }) {

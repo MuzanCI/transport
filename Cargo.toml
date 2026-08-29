@@ -23,7 +23,11 @@ muzanci-config = { path = "../muzanci-config" }
 muzanci-image = { path = "../muzanci-image" }
 muzanci-git = { path = "../muzanci-git" }
 tokio-stream = "0.1.19"
+strum = { version = "0.28.0", features = ["derive"] }
 
 [lib]
 name = "muzanci_transport"
 path = "src/lib.rs"
+
+[dev-dependencies]
+tracing-test = "0.2.6"

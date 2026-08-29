@@ -172,60 +172,60 @@ pub enum WorkerSchedulerMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerMessage {
-    StartRequest {
+    StartTaskRequest {
         runner_id: RunnerId,
         task_id: TaskId,
     },
-    StartResponse {
+    StartTaskResponse {
         result: Result<TaskConfig, String>,
     },
-    CompleteRequest {
+    CompleteTaskRequest {
         runner_id: RunnerId,
         task_id: TaskId,
     },
-    CompleteResponse {
+    CompleteTaskResponse {
         result: Result<(), String>,
     },
-    FailRequest {
+    FailTaskRequest {
         runner_id: RunnerId,
         task_id: TaskId,
         reason: String,
     },
-    FailResponse {
+    FailTaskResponse {
         result: Result<(), String>,
     },
-    StartStepRequest {
+    StartItemRequest {
         runner_id: RunnerId,
         task_id: TaskId,
         step_id: StepId,
     },
-    StartStepResponse {
+    StartItemResponse {
         result: Result<(), String>,
     },
-    CompleteStepRequest {
+    CompleteItemRequest {
         runner_id: RunnerId,
         task_id: TaskId,
         step_id: StepId,
     },
-    CompleteStepResponse {
+    CompleteItemResponse {
         result: Result<(), String>,
     },
-    FailStepRequest {
+    FailItemRequest {
         runner_id: RunnerId,
         task_id: TaskId,
         step_id: StepId,
         reason: String,
     },
-    FailStepResponse {
+    FailItemResponse {
         result: Result<(), String>,
     },
-    StepProcessOutput {
+    ItemProcessOutput {
         runner_id: RunnerId,
         task_id: TaskId,
         step_id: StepId,
         output: ProcessOutput,
     },
-    StepProcessExitStatus {
+    ItemProcessExitStatus {
         runner_id: RunnerId,
         task_id: TaskId,
         step_id: StepId,

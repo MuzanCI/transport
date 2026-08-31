@@ -30,9 +30,14 @@ use crate::message::Message;
 pub struct MuxError(pub String);
 
 #[derive(Debug)]
-pub struct OpenChannelCommandResult {
+pub struct OpenChannelCommandReply {
     message_rx: mpsc::Receiver<Message>,
-    closed: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+pub enum CloseChannelCommandReply {
+    ChannelClosed(ChannelId),
+    ChannelIdDoesNotExist(ChannelId),
 }
 
 /// A command sent to the mux to perform an action, such as opening a channel.
@@ -44,17 +49,20 @@ pub enum Command {
     OpenChannel {
         channel_id: ChannelId,
         channel_type: ChannelType,
-        reply_tx: oneshot::Sender<Result<OpenChannelCommandResult, MuxError>>,
+        reply_tx: oneshot::Sender<Result<OpenChannelCommandReply, MuxError>>,
     },
 
     /// A command for the mux to close a channel.
-    CloseChannel { channel_id: ChannelId },
+    CloseChannel {
+        channel_id: ChannelId,
+        reply_tx: oneshot::Sender<CloseChannelCommandReply>,
+    },
 }
 
 #[derive(Clone)]
 pub struct MuxHandle {
-    outgoing_frame_tx: mpsc::Sender<Frame>,
-    command_tx: mpsc::Sender<Command>,
+    channel_outgoing_frame_tx: mpsc::Sender<Frame>,
+    command_tx: mpsc::UnboundedSender<Command>,
 }
 
 impl MuxHandle {
@@ -72,28 +80,38 @@ impl MuxHandle {
                 channel_type,
                 reply_tx,
             })
-            .await
             .map_err(|e| MuxError(format!("Failed to send open channel command: {}", e)))?;
 
-        let OpenChannelCommandResult { message_rx, closed } = reply_rx
+        let OpenChannelCommandReply { message_rx } = reply_rx
             .await
             .map_err(|e| MuxError(format!("Open channel command resulted in an error: {}", e)))??;
 
         Ok(channel(
             channel_id,
             channel_type,
-            self.outgoing_frame_tx.clone(),
+            self.channel_outgoing_frame_tx.clone(),
             self.command_tx.clone(),
             message_rx,
-            closed,
         ))
     }
 
-    pub async fn close_channel(&self, channel_id: ChannelId) -> Result<(), MuxError> {
+    pub async fn close_channel(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<CloseChannelCommandReply, MuxError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(Command::CloseChannel { channel_id })
+            .send(Command::CloseChannel {
+                channel_id,
+                reply_tx,
+            })
+            .map_err(|e| MuxError(format!("Failed to send close channel command: {}", e)))?;
+
+        let reply = reply_rx
             .await
-            .map_err(|e| MuxError(format!("Failed to send close channel command: {}", e)))
+            .map_err(|e| MuxError(format!("Close channel command resulted in an error: {}", e)))?;
+
+        Ok(reply)
     }
 }
 
@@ -109,7 +127,7 @@ enum MuxStatus {
 struct PendingChannel {
     channel_id: ChannelId,
     channel_type: ChannelType,
-    reply_tx: oneshot::Sender<Result<OpenChannelCommandResult, MuxError>>,
+    reply_tx: oneshot::Sender<Result<OpenChannelCommandReply, MuxError>>,
 }
 
 impl std::fmt::Display for PendingChannel {
@@ -136,7 +154,6 @@ struct OpenChannel {
     channel_type: ChannelType,
     status: OpenChannelStatus,
     message_tx: mpsc::Sender<Message>,
-    closed: Arc<AtomicBool>,
 }
 
 impl std::fmt::Display for OpenChannel {
@@ -153,13 +170,21 @@ pub struct Mux<Acceptor>
 where
     Acceptor: ChannelAcceptor,
 {
+    /// For receiving frames from the dedicated IO stream reader task.
     incoming_frame_rx: mpsc::Receiver<Frame>,
 
+    /// For sending frames to the dedicated IO stream writer task.
     outgoing_frame_tx: mpsc::Sender<Frame>,
 
-    command_tx: mpsc::Sender<Command>,
+    /// For sending frames from channel handles.
+    channel_outgoing_frame_tx: mpsc::Sender<Frame>,
 
-    command_rx: mpsc::Receiver<Command>,
+    /// For forwarding frames from channel handles to the dedicated IO stream writer task.
+    channel_outgoing_frame_rx: mpsc::Receiver<Frame>,
+
+    command_tx: mpsc::UnboundedSender<Command>,
+
+    command_rx: mpsc::UnboundedReceiver<Command>,
 
     /// A handler for incoming channel open requests from the peer.
     channel_acceptor: Acceptor,
@@ -206,7 +231,7 @@ where
                                     break;
                                 }
                                 Some(Err(e)) => {
-                                    tracing::error!("Failed to read frame from peer connection: {}", e);
+                                    tracing::info!("Failed to read frame from peer connection: {}", e);
                                     break;
                                 }
                                 Some(Ok(frame)) => {
@@ -218,11 +243,13 @@ where
                             }
                         }
                         _ = incoming_frame_tx.closed() => {
-                            tracing::info!("Mux task has dropped. Dropping reader task.");
+                            tracing::info!("Mux actor frame receiver has dropped.");
                             break;
                         }
                     }
                 }
+
+                tracing::info!("Mux incoming frame reader task exiting.");
             });
 
             incoming_frame_rx
@@ -238,29 +265,37 @@ where
                 loop {
                     match outgoing_frame_rx.recv().await {
                         Some(frame) => {
-                            framed_writer.send(frame).await.unwrap();
+                            if let Err(e) = framed_writer.send(frame).await {
+                                tracing::info!(
+                                    "Dropping outgoing frame because IO stream has closed: {}",
+                                    e
+                                );
+                            }
                         }
                         None => {
-                            tracing::info!("Peer has dropped.");
+                            tracing::info!("Mux actor frame sender has dropped.");
                             break;
                         }
                     }
                 }
-                tracing::info!("Writer task exiting.");
+
+                tracing::info!("Mux outgoing frame writer task exiting.");
             });
 
             outgoing_frame_tx
         };
 
-        // TODO: Tweak channel capacity for performance.
-        let (command_tx, command_rx) = mpsc::channel(1);
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
 
         let mux_command_tx = command_tx.clone();
-        let mux_outgoing_frame_tx = outgoing_frame_tx.clone();
+        let (channel_outgoing_frame_tx, channel_outgoing_frame_rx) = mpsc::channel(1);
+        let mux_channel_outgoing_frame_tx = channel_outgoing_frame_tx.clone();
         let join_handle = tokio::spawn(async move {
             Self {
                 incoming_frame_rx,
-                outgoing_frame_tx: mux_outgoing_frame_tx,
+                outgoing_frame_tx,
+                channel_outgoing_frame_tx: mux_channel_outgoing_frame_tx,
+                channel_outgoing_frame_rx,
                 command_rx,
                 channel_acceptor,
                 cancellation_token,
@@ -274,8 +309,8 @@ where
         });
 
         let mux_handle = MuxHandle {
+            channel_outgoing_frame_tx,
             command_tx,
-            outgoing_frame_tx,
         };
 
         (join_handle, mux_handle)
@@ -289,16 +324,26 @@ where
 
             tokio::select! {
                 _ = self.cancellation_token.cancelled(), if self.status == MuxStatus::Running => {
-                    self.shutdown().await;
-                    tracing::info!("status={:?} open_channels.is_empty={}", self.status, self.open_channels.is_empty());
+                    self.shutdown();
                 }
                 frame_opt = self.incoming_frame_rx.recv() => {
                     match frame_opt {
                         Some(frame) => {
-                            self.handle_incoming_frame(frame).await;
+                            self.recv_incoming_frame(frame).await;
                         }
                         None => {
                             tracing::info!("Incoming frame task has dropped.");
+                            break;
+                        }
+                    }
+                }
+                frame_opt = self.channel_outgoing_frame_rx.recv() => {
+                    match frame_opt {
+                        Some(frame) => {
+                            self.send_outgoing_frame(frame).await;
+                        }
+                        None => {
+                            tracing::info!("Channel outgoing frame task has dropped.");
                             break;
                         }
                     }
@@ -316,11 +361,47 @@ where
                 }
             }
         }
-        tracing::info!("broke out");
+
+        tracing::info!("Mux actor task is terminating.");
+    }
+
+    async fn send_outgoing_frame(&mut self, frame: Frame) {
+        if frame.channel_id.is_nil() {
+            if let Err(e) = self.outgoing_frame_tx.send(frame).await {
+                tracing::error!("Failed to send outgoing frame: {}", e)
+            }
+            return;
+        }
+
+        match self.open_channels.get(&frame.channel_id) {
+            Some(OpenChannel {
+                status: OpenChannelStatus::NotAwaitingCloseResponse,
+                ..
+            }) => {
+                if let Err(e) = self.outgoing_frame_tx.send(frame).await {
+                    tracing::error!("Failed to send outgoing frame: {}", e)
+                }
+            }
+            Some(OpenChannel {
+                status: OpenChannelStatus::AwaitingCloseResponse,
+                ..
+            }) => {
+                tracing::error!(
+                    "Attempted to send channel frame for channel that is awaiting close response: {}",
+                    frame.channel_id
+                )
+            }
+            None => {
+                tracing::error!(
+                    "Attempted to send channel frame for unknown channel: {}",
+                    frame.channel_id
+                )
+            }
+        }
     }
 
     /// Drain all pending channels and close all channels.
-    async fn shutdown(&mut self) {
+    fn shutdown(&mut self) {
         tracing::info!("Shutting down mux...");
         self.status = MuxStatus::ShuttingDown;
 
@@ -334,33 +415,23 @@ where
             )));
         }
 
-        tracing::info!("Closing {} open channels...", self.open_channels.len());
-        for open_channel in self.open_channels.values_mut() {
-            open_channel.closed.store(true, Ordering::SeqCst);
-            open_channel.status = OpenChannelStatus::AwaitingCloseResponse;
-        }
-
-        tracing::info!("Requesting peer mux to close channels...");
-        let open_channel_ids: Vec<ChannelId> = self.open_channels.keys().copied().collect();
-        for channel_id in open_channel_ids {
-            self.send(Frame {
-                channel_id: ChannelId::nil(),
-                message: Message::Control(ControlMessage::CloseChannelRequest { channel_id }),
-            })
-            .await;
+        for channel_id in self.open_channels.keys().copied().into_iter() {
+            let (reply_tx, _reply_rx) = oneshot::channel();
+            if let Err(e) = self.command_tx.send(Command::CloseChannel {
+                channel_id,
+                reply_tx,
+            }) {
+                panic!(
+                    "Failed to send close channel command during shutdown: {}",
+                    e
+                );
+            }
         }
         tracing::info!("Awaiting shutdown completion by peer mux...");
     }
 
-    /// Sending an outgoing frame to the peer.
-    async fn send(&mut self, frame: Frame) {
-        if let Err(e) = self.outgoing_frame_tx.send(frame).await {
-            panic!("Failed to send outgoing frame: {}", e);
-        }
-    }
-
     /// Handle an incoming frame from the peer.
-    async fn handle_incoming_frame(&mut self, frame: Frame) {
+    async fn recv_incoming_frame(&mut self, frame: Frame) {
         if frame.channel_id.is_nil() {
             // Message for control channel.
             match frame.message {
@@ -389,7 +460,7 @@ where
                 _ => {
                     tracing::error!("Unexpected message on control channel: {:?}", frame.message);
                     tracing::warn!("Shutting down mux.");
-                    self.shutdown().await;
+                    self.shutdown();
                 }
             }
         } else {
@@ -410,7 +481,7 @@ where
                 channel,
             );
 
-            self.send(Frame {
+            self.send_outgoing_frame(Frame {
                 channel_id: ChannelId::nil(),
                 message: Message::Control(ControlMessage::OpenChannelResponse {
                     channel_id,
@@ -428,7 +499,7 @@ where
                 channel,
             );
 
-            self.send(Frame {
+            self.send_outgoing_frame(Frame {
                 channel_id: ChannelId::nil(),
                 message: Message::Control(ControlMessage::OpenChannelResponse {
                     channel_id,
@@ -443,7 +514,7 @@ where
         if self.status == MuxStatus::ShuttingDown {
             tracing::warn!("Received open channel request while shutting down",);
 
-            self.send(Frame {
+            self.send_outgoing_frame(Frame {
                 channel_id: ChannelId::nil(),
                 message: Message::Control(ControlMessage::OpenChannelResponse {
                     channel_id,
@@ -460,7 +531,7 @@ where
             Err(err) => {
                 tracing::error!("Failed to accept open channel request: {}", err);
 
-                self.send(Frame {
+                self.send_outgoing_frame(Frame {
                     channel_id: ChannelId::nil(),
                     message: Message::Control(ControlMessage::OpenChannelResponse {
                         channel_id,
@@ -476,19 +547,16 @@ where
         // TODO: Tweak channel capacity for performance.
         let (message_tx, message_rx) = mpsc::channel(1);
 
-        let closed = Arc::new(AtomicBool::new(false));
-
         let open_channel = OpenChannel {
             channel_id: channel_id.clone(),
             channel_type: channel_type.clone(),
             status: OpenChannelStatus::NotAwaitingCloseResponse,
             message_tx,
-            closed: closed.clone(),
         };
 
         self.open_channels.insert(channel_id, open_channel);
 
-        self.send(Frame {
+        self.send_outgoing_frame(Frame {
             channel_id: ChannelId::nil(),
             message: Message::Control(ControlMessage::OpenChannelResponse {
                 channel_id,
@@ -500,10 +568,9 @@ where
         let (tx, rx) = channel(
             channel_id,
             channel_type,
-            self.outgoing_frame_tx.clone(),
+            self.channel_outgoing_frame_tx.clone(),
             self.command_tx.clone(),
             message_rx,
-            closed.clone(),
         );
 
         tokio::spawn(future_fn(tx, rx));
@@ -531,8 +598,6 @@ where
                 // TODO: Tweak channel capacity for performance.
                 let (message_tx, message_rx) = mpsc::channel(1);
 
-                let closed = Arc::new(AtomicBool::new(false));
-
                 self.open_channels.insert(
                     channel_id,
                     OpenChannel {
@@ -540,13 +605,12 @@ where
                         channel_type: pending_channel.channel_type,
                         status: OpenChannelStatus::NotAwaitingCloseResponse,
                         message_tx,
-                        closed: closed.clone(),
                     },
                 );
 
                 let _ = pending_channel
                     .reply_tx
-                    .send(Ok(OpenChannelCommandResult { message_rx, closed }));
+                    .send(Ok(OpenChannelCommandReply { message_rx }));
             }
             Err(err) => {
                 tracing::error!("Failed to open channel [{}]: {}", pending_channel, err);
@@ -558,13 +622,11 @@ where
     async fn handle_close_channel_request(&mut self, channel_id: ChannelId) {
         match self.open_channels.get_mut(&channel_id) {
             Some(open_channel) => {
-                open_channel.closed.store(true, Ordering::SeqCst);
-
                 if open_channel.status == OpenChannelStatus::NotAwaitingCloseResponse {
                     self.open_channels.remove(&channel_id);
                 }
 
-                self.send(Frame {
+                self.send_outgoing_frame(Frame {
                     channel_id: ChannelId::nil(),
                     message: Message::Control(ControlMessage::CloseChannelResponse {
                         channel_id,
@@ -579,7 +641,7 @@ where
                     channel_id
                 );
 
-                self.send(Frame {
+                self.send_outgoing_frame(Frame {
                     channel_id: ChannelId::nil(),
                     message: Message::Control(ControlMessage::CloseChannelResponse {
                         channel_id,
@@ -662,8 +724,12 @@ where
                 self.handle_open_channel_command(channel_id, channel_type, reply_tx)
                     .await;
             }
-            Command::CloseChannel { channel_id } => {
-                self.handle_close_channel_command(channel_id).await;
+            Command::CloseChannel {
+                channel_id,
+                reply_tx,
+            } => {
+                self.handle_close_channel_command(channel_id, reply_tx)
+                    .await;
             }
         }
     }
@@ -673,7 +739,7 @@ where
         &mut self,
         channel_id: ChannelId,
         channel_type: ChannelType,
-        reply_tx: oneshot::Sender<Result<OpenChannelCommandResult, MuxError>>,
+        reply_tx: oneshot::Sender<Result<OpenChannelCommandReply, MuxError>>,
     ) {
         if self.open_channels.contains_key(&channel_id) {
             let _ = reply_tx.send(Err(MuxError(format!(
@@ -708,7 +774,7 @@ where
             },
         );
 
-        self.send(Frame {
+        self.send_outgoing_frame(Frame {
             channel_id: ChannelId::nil(),
             message: Message::Control(ControlMessage::OpenChannelRequest {
                 channel_id,
@@ -719,23 +785,29 @@ where
     }
 
     /// Handle a command from a local task to close a channel.
-    async fn handle_close_channel_command(&mut self, channel_id: ChannelId) {
+    async fn handle_close_channel_command(
+        &mut self,
+        channel_id: ChannelId,
+        reply_tx: oneshot::Sender<CloseChannelCommandReply>,
+    ) {
         match self.open_channels.get_mut(&channel_id) {
             Some(open_channel) => {
-                open_channel.closed.store(true, Ordering::SeqCst);
+                let _ = reply_tx.send(CloseChannelCommandReply::ChannelClosed(channel_id));
+
+                if open_channel.status == OpenChannelStatus::AwaitingCloseResponse {
+                    return;
+                }
+
                 open_channel.status = OpenChannelStatus::AwaitingCloseResponse;
 
-                self.send(Frame {
+                self.send_outgoing_frame(Frame {
                     channel_id: ChannelId::nil(),
                     message: Message::Control(ControlMessage::CloseChannelRequest { channel_id }),
                 })
                 .await;
             }
             None => {
-                tracing::warn!(
-                    "Received command to close non-existent channel ID: [{}]",
-                    channel_id
-                );
+                let _ = reply_tx.send(CloseChannelCommandReply::ChannelIdDoesNotExist(channel_id));
             }
         }
     }
@@ -917,7 +989,6 @@ mod test {
                     channel_type: ChannelType::Worker,
                     reply_tx,
                 })
-                .await
                 .unwrap();
 
             reply_rx

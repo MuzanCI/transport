@@ -20,6 +20,8 @@ use serde::Serialize;
 use tokio::io::AsyncWrite;
 use tokio::io::{self};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::SendError;
+use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::StreamReader;
@@ -77,16 +79,14 @@ pub fn channel(
     channel_id: ChannelId,
     channel_type: ChannelType,
     frame_tx: mpsc::Sender<Frame>,
-    command_tx: mpsc::Sender<Command>,
+    command_tx: mpsc::UnboundedSender<Command>,
     message_rx: mpsc::Receiver<Message>,
-    closed: Arc<AtomicBool>,
 ) -> (ChannelSender, ChannelReceiver) {
     let sender = ChannelSender {
         channel_id,
         channel_type,
         frame_tx,
         command_tx: command_tx.clone(),
-        closed: closed.clone(),
     };
 
     let receiver = ChannelReceiver {
@@ -94,7 +94,6 @@ pub fn channel(
         channel_type,
         message_stream: ReceiverStream::new(message_rx),
         command_tx: command_tx.clone(),
-        closed: closed.clone(),
     };
 
     (sender, receiver)
@@ -115,22 +114,12 @@ pub struct ChannelSender {
     frame_tx: mpsc::Sender<Frame>,
 
     /// A sender for commands to the mux task, such as closing the channel.
-    command_tx: mpsc::Sender<Command>,
-
-    /// Whether or not the channel has been closed.
-    closed: Arc<AtomicBool>,
+    command_tx: mpsc::UnboundedSender<Command>,
 }
 
 impl ChannelSender {
     /// Sends a [`Message`] to the peer.
     pub async fn send(&self, message: Message) -> Result<(), MuxError> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(MuxError(format!(
-                "ChannelSender [{}][{}] attempted to send after channel has closed.",
-                self.channel_type, self.channel_id
-            )));
-        }
-
         let frame = Frame {
             channel_id: self.channel_id,
             message,
@@ -155,10 +144,7 @@ pub struct ChannelPollSender {
     frame_tx: PollSender<Frame>,
 
     /// A sender for commands to the mux task, such as closing the channel.
-    command_tx: mpsc::Sender<Command>,
-
-    /// Whether or not the channel has been closed.
-    closed: Arc<AtomicBool>,
+    command_tx: mpsc::UnboundedSender<Command>,
 }
 
 impl ChannelPollSender {
@@ -168,19 +154,11 @@ impl ChannelPollSender {
             channel_type: sender.channel_type,
             frame_tx: PollSender::new(sender.frame_tx),
             command_tx: sender.command_tx,
-            closed: sender.closed,
         }
     }
 
     /// Poll-based (synchronous) reservation of a permit to send a message.
     pub fn poll_reserve(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), MuxError>> {
-        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Poll::Ready(Err(MuxError(format!(
-                "ChannelSender [{}][{}] attempted to poll reserve after channel has closed.",
-                self.channel_type, self.channel_id
-            ))));
-        }
-
         match self.frame_tx.poll_reserve(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
             Poll::Ready(Err(e)) => Poll::Ready(Err(MuxError(format!(
@@ -192,12 +170,6 @@ impl ChannelPollSender {
     }
 
     pub fn send_item(&mut self, value: Frame) -> Result<(), MuxError> {
-        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(MuxError(format!(
-                "ChannelSender [{}][{}] attempted to send item after channel has closed.",
-                self.channel_type, self.channel_id
-            )));
-        }
         self.frame_tx.send_item(value).map_err(|e| {
             MuxError(format!(
                 "ChannelSender [{}][{}] failed to send item: {}",
@@ -242,8 +214,10 @@ impl AsyncWrite for ChannelPollSender {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         // Half-close: tell the mux task this side is done writing.
+        let (reply_tx, _reply_rx) = oneshot::channel();
         let _ = self.command_tx.send(Command::CloseChannel {
             channel_id: self.channel_id,
+            reply_tx,
         });
         Poll::Ready(Ok(()))
     }
@@ -259,37 +233,14 @@ pub struct ChannelReceiver {
     message_stream: ReceiverStream<Message>,
 
     /// A sender for commands to the mux task, such as closing the channel.
-    command_tx: mpsc::Sender<Command>,
-
-    /// Whether or not the channel has been closed.
-    closed: Arc<AtomicBool>,
+    command_tx: mpsc::UnboundedSender<Command>,
 }
 
 impl ChannelReceiver {
     /// Receives a [`Message`] from the channel.
     /// Returns [`None`] if the channel has been closed.
     pub async fn recv(&mut self) -> Option<Message> {
-        if self.closed.load(Ordering::SeqCst) {
-            tracing::info!(
-                "ChannelReceiver [{:?}][{}] has been closed.",
-                self.channel_type,
-                self.channel_id
-            );
-            return None;
-        }
-
-        match self.message_stream.next().await {
-            Some(message) => Some(message),
-            None => {
-                tracing::warn!(
-                    "ChannelReceiver [{}][{}] attempted to receive message after mux task has dropped.",
-                    self.channel_type,
-                    self.channel_id
-                );
-
-                None
-            }
-        }
+        self.message_stream.next().await
     }
 }
 
@@ -319,37 +270,20 @@ impl Stream for ChannelReceiver {
 impl Drop for ChannelReceiver {
     fn drop(&mut self) {
         tracing::info!(
-            "Dropping ChannelReceiver [{:?}][{}]",
+            "Dropping ChannelReceiver [{:?}][{}]. Sending close command.",
             self.channel_type,
             self.channel_id
         );
 
-        let already_closed = self
-            .closed
-            .fetch_or(true, std::sync::atomic::Ordering::SeqCst);
+        let (reply_tx, _reply_rx) = oneshot::channel();
 
-        if already_closed {
-            tracing::info!(
-                "ChannelReceiver [{:?}][{}] already closed, not sending close command",
-                self.channel_type,
-                self.channel_id
-            );
-            return;
-        }
-
-        tracing::info!(
-            "ChannelReceiver [{:?}][{}] sending close command.",
-            self.channel_type,
-            self.channel_id
-        );
-
-        if let Err(e) = self.command_tx.try_send(Command::CloseChannel {
+        if let Err(_) = self.command_tx.send(Command::CloseChannel {
             channel_id: self.channel_id,
+            reply_tx,
         }) {
-            tracing::error!(
-                "Failed to send close command for channel_id {}: {}",
+            tracing::info!(
+                "Unable to send close command for channel_id [{}] because mux task has already terminated.",
                 self.channel_id,
-                e
             );
         }
     }

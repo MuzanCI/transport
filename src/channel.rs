@@ -27,8 +27,8 @@ use tokio_util::sync::PollSender;
 
 use crate::codec::Frame;
 use crate::message::Message;
-use crate::mux2::Command;
-use crate::mux2::MuxError;
+use crate::mux::Command;
+use crate::mux::MuxError;
 
 pub type ChannelId = uuid::Uuid;
 

@@ -32,6 +32,7 @@ pub struct MuxError(pub String);
 #[derive(Debug)]
 pub struct OpenChannelCommandReply {
     message_rx: mpsc::Receiver<Message>,
+    channel_closed: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -62,15 +63,14 @@ pub enum Command {
 #[derive(Clone)]
 pub struct MuxHandle {
     channel_outgoing_frame_tx: mpsc::Sender<Frame>,
-    command_tx: mpsc::UnboundedSender<Command>,
+    command_tx: mpsc::Sender<Command>,
 }
 
 impl MuxHandle {
-    #[tracing::instrument(skip_all)]
     pub async fn open_channel(
         &self,
         channel_type: ChannelType,
-    ) -> Result<(ChannelSender, ChannelReceiver), MuxError> {
+    ) -> Result<(ChannelSender, ChannelReceiver, CancellationToken), MuxError> {
         tracing::info!("Requesting to open channel of type [{:?}]", channel_type);
         let channel_id = uuid::Uuid::now_v7();
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -80,19 +80,25 @@ impl MuxHandle {
                 channel_type,
                 reply_tx,
             })
+            .await
             .map_err(|e| MuxError(format!("Failed to send open channel command: {}", e)))?;
 
-        let OpenChannelCommandReply { message_rx } = reply_rx
+        let OpenChannelCommandReply {
+            message_rx,
+            channel_closed,
+        } = reply_rx
             .await
             .map_err(|e| MuxError(format!("Open channel command resulted in an error: {}", e)))??;
 
-        Ok(channel(
+        let (channel_tx, channel_rx) = channel(
             channel_id,
             channel_type,
             self.channel_outgoing_frame_tx.clone(),
             self.command_tx.clone(),
             message_rx,
-        ))
+        );
+
+        Ok((channel_tx, channel_rx, channel_closed))
     }
 
     pub async fn close_channel(
@@ -105,6 +111,7 @@ impl MuxHandle {
                 channel_id,
                 reply_tx,
             })
+            .await
             .map_err(|e| MuxError(format!("Failed to send close channel command: {}", e)))?;
 
         let reply = reply_rx
@@ -154,6 +161,7 @@ struct OpenChannel {
     channel_type: ChannelType,
     status: OpenChannelStatus,
     message_tx: mpsc::Sender<Message>,
+    channel_closed: CancellationToken,
 }
 
 impl std::fmt::Display for OpenChannel {
@@ -182,9 +190,9 @@ where
     /// For forwarding frames from channel handles to the dedicated IO stream writer task.
     channel_outgoing_frame_rx: mpsc::Receiver<Frame>,
 
-    command_tx: mpsc::UnboundedSender<Command>,
+    command_tx: mpsc::Sender<Command>,
 
-    command_rx: mpsc::UnboundedReceiver<Command>,
+    command_rx: mpsc::Receiver<Command>,
 
     /// A handler for incoming channel open requests from the peer.
     channel_acceptor: Acceptor,
@@ -285,7 +293,7 @@ where
             outgoing_frame_tx
         };
 
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::channel(1);
 
         let mux_command_tx = command_tx.clone();
         let (channel_outgoing_frame_tx, channel_outgoing_frame_rx) = mpsc::channel(1);
@@ -415,18 +423,30 @@ where
             )));
         }
 
-        for channel_id in self.open_channels.keys().copied().into_iter() {
-            let (reply_tx, _reply_rx) = oneshot::channel();
-            if let Err(e) = self.command_tx.send(Command::CloseChannel {
-                channel_id,
-                reply_tx,
-            }) {
-                panic!(
-                    "Failed to send close channel command during shutdown: {}",
-                    e
-                );
+        // Enqueue close channel commands for all open channels.
+        // Mux::shutdown is synchronous so we cannot enqueue close channel commands directly.
+        // Instead, we spawn a separate task so the main mux task can return to the Mux::run loop.
+        let open_channel_ids = self.open_channels.keys().copied().collect::<Vec<_>>();
+        let command_tx = self.command_tx.clone();
+
+        tokio::spawn(async move {
+            for channel_id in open_channel_ids {
+                let (reply_tx, _reply_rx) = oneshot::channel();
+                if let Err(e) = command_tx
+                    .send(Command::CloseChannel {
+                        channel_id,
+                        reply_tx,
+                    })
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to send close channel command during shutdown: {}",
+                        e
+                    )
+                }
             }
-        }
+        });
+
         tracing::info!("Awaiting shutdown completion by peer mux...");
     }
 
@@ -546,12 +566,14 @@ where
 
         // TODO: Tweak channel capacity for performance.
         let (message_tx, message_rx) = mpsc::channel(1);
+        let channel_closed = CancellationToken::new();
 
         let open_channel = OpenChannel {
             channel_id: channel_id.clone(),
             channel_type: channel_type.clone(),
             status: OpenChannelStatus::NotAwaitingCloseResponse,
             message_tx,
+            channel_closed: channel_closed.clone(),
         };
 
         self.open_channels.insert(channel_id, open_channel);
@@ -573,7 +595,7 @@ where
             message_rx,
         );
 
-        tokio::spawn(future_fn(tx, rx));
+        tokio::spawn(future_fn(tx, rx, channel_closed));
     }
 
     /// Handle a response from the peer about opening a channel.
@@ -597,6 +619,7 @@ where
             Ok(()) => {
                 // TODO: Tweak channel capacity for performance.
                 let (message_tx, message_rx) = mpsc::channel(1);
+                let channel_closed = CancellationToken::new();
 
                 self.open_channels.insert(
                     channel_id,
@@ -605,12 +628,14 @@ where
                         channel_type: pending_channel.channel_type,
                         status: OpenChannelStatus::NotAwaitingCloseResponse,
                         message_tx,
+                        channel_closed: channel_closed.clone(),
                     },
                 );
 
-                let _ = pending_channel
-                    .reply_tx
-                    .send(Ok(OpenChannelCommandReply { message_rx }));
+                let _ = pending_channel.reply_tx.send(Ok(OpenChannelCommandReply {
+                    message_rx,
+                    channel_closed,
+                }));
             }
             Err(err) => {
                 tracing::error!("Failed to open channel [{}]: {}", pending_channel, err);
@@ -620,10 +645,17 @@ where
 
     /// Handle a request from the peer about closing a channel.
     async fn handle_close_channel_request(&mut self, channel_id: ChannelId) {
-        match self.open_channels.get_mut(&channel_id) {
+        match self.open_channels.remove(&channel_id) {
             Some(open_channel) => {
-                if open_channel.status == OpenChannelStatus::NotAwaitingCloseResponse {
-                    self.open_channels.remove(&channel_id);
+                match open_channel.status {
+                    OpenChannelStatus::NotAwaitingCloseResponse => {
+                        // Allow open_channel to be removed and notify waiters.
+                        open_channel.channel_closed.cancel();
+                    }
+                    OpenChannelStatus::AwaitingCloseResponse => {
+                        // Restore open_channel and wait for close response.
+                        self.open_channels.insert(channel_id, open_channel);
+                    }
                 }
 
                 self.send_outgoing_frame(Frame {
@@ -663,18 +695,20 @@ where
             tracing::warn!("Peer failed to close channel [{}]: {}", channel_id, e);
         }
 
-        match self.open_channels.get_mut(&channel_id) {
+        match self.open_channels.remove(&channel_id) {
             Some(open_channel) => {
                 match open_channel.status {
                     OpenChannelStatus::NotAwaitingCloseResponse => {
                         // Protocol failure. This side did not send close request so remote should not send response.
+                        // Restore open_channel and keep it open.
                         tracing::warn!(
                             "Received close channel response for not-awaiting-close channel ID [{}]",
                             channel_id
                         );
                     }
                     OpenChannelStatus::AwaitingCloseResponse => {
-                        self.open_channels.remove(&channel_id);
+                        // Allow open_channel to drop and notify waiters.
+                        open_channel.channel_closed.cancel();
                     }
                 };
             }
@@ -822,7 +856,7 @@ mod test {
     use super::*;
 
     fn noop_acceptor() -> impl ChannelAcceptor {
-        FnChannelAcceptor::new(|_id, _ty| Ok(Box::new(|_tx, _rx| Box::pin(async {}))))
+        FnChannelAcceptor::new(|_id, _ty| Ok(Box::new(|_tx, _rx, _notify| Box::pin(async {}))))
     }
 
     struct TestMuxPair {
@@ -886,13 +920,13 @@ mod test {
         {
             let mux_handle_a = mux_handle_a;
             tokio::spawn(async move {
-                let (channel_sender_a, channel_receiver_a) = mux_handle_a
+                let (channel_sender_a, channel_receiver_a, _notify) = mux_handle_a
                     .open_channel(ChannelType::Worker)
                     .await
                     .expect("channel should open");
 
                 tokio::spawn(async move {
-                    let _ = (channel_sender_a, channel_receiver_a);
+                    let _ = (channel_sender_a, channel_receiver_a, _notify);
                 })
             });
         }
@@ -932,13 +966,13 @@ mod test {
             for _ in 0..10 {
                 let mux_handle_a = mux_handle_a.clone();
                 tokio::spawn(async move {
-                    let (channel_sender_a, channel_receiver_a) = mux_handle_a
+                    let (channel_sender_a, channel_receiver_a, _notify) = mux_handle_a
                         .open_channel(ChannelType::Worker)
                         .await
                         .expect("channel should open");
 
                     tokio::spawn(async move {
-                        let _ = (channel_sender_a, channel_receiver_a);
+                        let _ = (channel_sender_a, channel_receiver_a, _notify);
                     });
                 });
             }
@@ -989,6 +1023,7 @@ mod test {
                     channel_type: ChannelType::Worker,
                     reply_tx,
                 })
+                .await
                 .unwrap();
 
             reply_rx
@@ -1135,7 +1170,7 @@ mod test {
         // Simulate task that drops initial peer mux_handle.
         drop(peer_handle);
 
-        let (_mux_channel_sender, _mux_channel_receiver) = mux_handle
+        let (_mux_channel_sender, _mux_channel_receiver, _notify) = mux_handle
             .open_channel(ChannelType::Worker)
             .await
             .expect("failed to open channel");

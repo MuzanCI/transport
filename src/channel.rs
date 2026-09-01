@@ -20,11 +20,11 @@ use serde::Serialize;
 use tokio::io::AsyncWrite;
 use tokio::io::{self};
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::SendError;
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::StreamReader;
+use tokio_util::sync::CancellationToken;
 use tokio_util::sync::PollSender;
 
 use crate::codec::Frame;
@@ -79,7 +79,7 @@ pub fn channel(
     channel_id: ChannelId,
     channel_type: ChannelType,
     frame_tx: mpsc::Sender<Frame>,
-    command_tx: mpsc::UnboundedSender<Command>,
+    command_tx: mpsc::Sender<Command>,
     message_rx: mpsc::Receiver<Message>,
 ) -> (ChannelSender, ChannelReceiver) {
     let sender = ChannelSender {
@@ -114,7 +114,7 @@ pub struct ChannelSender {
     frame_tx: mpsc::Sender<Frame>,
 
     /// A sender for commands to the mux task, such as closing the channel.
-    command_tx: mpsc::UnboundedSender<Command>,
+    command_tx: mpsc::Sender<Command>,
 }
 
 impl ChannelSender {
@@ -144,7 +144,7 @@ pub struct ChannelPollSender {
     frame_tx: PollSender<Frame>,
 
     /// A sender for commands to the mux task, such as closing the channel.
-    command_tx: mpsc::UnboundedSender<Command>,
+    command_tx: mpsc::Sender<Command>,
 }
 
 impl ChannelPollSender {
@@ -233,7 +233,7 @@ pub struct ChannelReceiver {
     message_stream: ReceiverStream<Message>,
 
     /// A sender for commands to the mux task, such as closing the channel.
-    command_tx: mpsc::UnboundedSender<Command>,
+    command_tx: mpsc::Sender<Command>,
 }
 
 impl ChannelReceiver {
@@ -253,15 +253,7 @@ impl Stream for ChannelReceiver {
                 Message::RawData(data) => Poll::Ready(Some(Ok(Bytes::from(data)))),
                 _ => Poll::Ready(None),
             },
-            Poll::Ready(None) => {
-                tracing::warn!(
-                    "ChannelReceiver [{}][{}] attempted to receive message after mux task has dropped.",
-                    self.channel_type,
-                    self.channel_id
-                );
-
-                Poll::Ready(None)
-            }
+            Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -270,22 +262,30 @@ impl Stream for ChannelReceiver {
 impl Drop for ChannelReceiver {
     fn drop(&mut self) {
         tracing::info!(
-            "Dropping ChannelReceiver [{:?}][{}]. Sending close command.",
+            "Dropping ChannelReceiver [{:?}][{}]. Spawning task to send close command.",
             self.channel_type,
             self.channel_id
         );
 
-        let (reply_tx, _reply_rx) = oneshot::channel();
+        let command_tx = self.command_tx.clone();
+        let channel_id = self.channel_id.clone();
 
-        if let Err(_) = self.command_tx.send(Command::CloseChannel {
-            channel_id: self.channel_id,
-            reply_tx,
-        }) {
-            tracing::info!(
-                "Unable to send close command for channel_id [{}] because mux task has already terminated.",
-                self.channel_id,
-            );
-        }
+        tokio::spawn(async move {
+            let (reply_tx, _reply_rx) = oneshot::channel();
+
+            if let Err(_) = command_tx
+                .send(Command::CloseChannel {
+                    channel_id,
+                    reply_tx,
+                })
+                .await
+            {
+                tracing::info!(
+                    "Unable to send close command for channel_id [{}] because mux task has already terminated.",
+                    channel_id,
+                );
+            }
+        });
     }
 }
 
@@ -304,7 +304,7 @@ pub fn combine_into_byte_stream(
 /// A function that accepts a channel handle and returns a future that sends
 /// and receives messages on the channel.
 pub type ChannelFutureFn =
-    dyn FnOnce(ChannelSender, ChannelReceiver) -> BoxFuture<'static, ()> + Send;
+    dyn FnOnce(ChannelSender, ChannelReceiver, CancellationToken) -> BoxFuture<'static, ()> + Send;
 
 /// Provides an operation to handle a channel open request from the peer.
 pub trait ChannelAcceptor
@@ -353,8 +353,8 @@ where
 /// Box::new and Box::pin at every call site.
 pub fn accept<F, Fut>(f: F) -> Box<ChannelFutureFn>
 where
-    F: FnOnce(ChannelSender, ChannelReceiver) -> Fut + Send + 'static,
+    F: FnOnce(ChannelSender, ChannelReceiver, CancellationToken) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    Box::new(move |tx, rx| Box::pin(f(tx, rx)))
+    Box::new(move |tx, rx, notify| Box::pin(f(tx, rx, notify)))
 }

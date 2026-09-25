@@ -5,15 +5,14 @@ use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
-use muzanci_config::Config;
-use muzanci_config::StepConfig;
-use muzanci_config::StepId;
+use muzanci_config::config::Config;
 use muzanci_config::config::DebugClientConfig;
 use muzanci_config::config::DebugSessionId;
+use muzanci_config::config::StepConfig;
+use muzanci_config::config::StepId;
 use muzanci_config::config::TriggerConfig;
 use muzanci_git::GitBranch;
-use muzanci_image::image::ImagePlatform;
-use muzanci_image::manifest_ref::ManifestRef;
+use uuid::Uuid;
 
 use crate::channel::ChannelId;
 use crate::channel::ChannelType;
@@ -65,9 +64,111 @@ pub enum ControlMessage {
     },
 }
 
-pub type RunnerId = uuid::Uuid;
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type
+)]
+#[serde(transparent)]
+#[sqlx(transparent)]
+pub struct RunnerId(Uuid);
 
-pub type TriggerId = uuid::Uuid;
+impl RunnerId {
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl std::fmt::Display for RunnerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<Uuid> for RunnerId {
+    fn from(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+}
+
+impl From<RunnerId> for Uuid {
+    fn from(id: RunnerId) -> Self {
+        id.0
+    }
+}
+
+impl TryFrom<&str> for RunnerId {
+    type Error = uuid::Error;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Ok(Self(Uuid::try_parse(s)?))
+    }
+}
+
+impl std::ops::Deref for RunnerId {
+    type Target = Uuid;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type
+)]
+#[serde(transparent)]
+#[sqlx(transparent)]
+pub struct TriggerId(Uuid);
+
+impl TriggerId {
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl std::fmt::Display for TriggerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<Uuid> for TriggerId {
+    fn from(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+}
+
+impl From<TriggerId> for Uuid {
+    fn from(id: TriggerId) -> Self {
+        id.0
+    }
+}
+
+impl TryFrom<&str> for TriggerId {
+    type Error = uuid::Error;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Ok(Self(Uuid::try_parse(s)?))
+    }
+}
+
+impl std::ops::Deref for TriggerId {
+    type Target = Uuid;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitingTrigger {

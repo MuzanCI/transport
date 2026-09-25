@@ -6,9 +6,6 @@
 //! into a sender and a receiver.
 
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 

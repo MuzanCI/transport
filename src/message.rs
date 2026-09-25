@@ -239,7 +239,58 @@ pub enum EvaluatorMessage {
     },
 }
 
-pub type TaskId = uuid::Uuid;
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type
+)]
+#[serde(transparent)]
+#[sqlx(transparent)]
+pub struct TaskId(Uuid);
+
+impl TaskId {
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<Uuid> for TaskId {
+    fn from(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+}
+
+impl From<TaskId> for Uuid {
+    fn from(id: TaskId) -> Self {
+        id.0
+    }
+}
+
+impl TryFrom<&str> for TaskId {
+    type Error = uuid::Error;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Ok(Self(Uuid::try_parse(s)?))
+    }
+}
+
+impl std::ops::Deref for TaskId {
+    type Target = Uuid;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitingTask {

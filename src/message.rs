@@ -9,7 +9,7 @@ use muzanci_config::config::Config;
 use muzanci_config::config::DebugClientConfig;
 use muzanci_config::config::DebugSessionId;
 use muzanci_config::config::StepConfig;
-use muzanci_config::config::StepId;
+use muzanci_config::config::StepIndex;
 use muzanci_config::config::TriggerConfig;
 use muzanci_git::GitBranch;
 use uuid::Uuid;
@@ -349,7 +349,7 @@ pub enum WorkerMessage {
     StartItemRequest {
         runner_id: RunnerId,
         task_id: TaskId,
-        step_id: StepId,
+        step_index: StepIndex,
     },
     StartItemResponse {
         result: Result<(), String>,
@@ -357,7 +357,7 @@ pub enum WorkerMessage {
     CompleteItemRequest {
         runner_id: RunnerId,
         task_id: TaskId,
-        step_id: StepId,
+        step_index: StepIndex,
     },
     CompleteItemResponse {
         result: Result<(), String>,
@@ -365,7 +365,7 @@ pub enum WorkerMessage {
     FailItemRequest {
         runner_id: RunnerId,
         task_id: TaskId,
-        step_id: StepId,
+        step_index: StepIndex,
         reason: String,
     },
     FailItemResponse {
@@ -374,13 +374,13 @@ pub enum WorkerMessage {
     ItemProcessOutput {
         runner_id: RunnerId,
         task_id: TaskId,
-        step_id: StepId,
+        step_index: StepIndex,
         output: ProcessOutput,
     },
     ItemProcessExitStatus {
         runner_id: RunnerId,
         task_id: TaskId,
-        step_id: StepId,
+        step_index: StepIndex,
         exit_status: ExitStatus,
     },
 }

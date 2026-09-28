@@ -55,8 +55,8 @@ impl Encoder<Frame> for Codec {
     type Error = CodecError;
 
     fn encode(&mut self, item: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let message = postcard::to_allocvec(&item.message)
-            .map_err(|e| CodecError::MessageSerializationError(e))?;
+        let message =
+            postcard::to_allocvec(&item.message).map_err(CodecError::MessageSerializationError)?;
 
         if message.len() > FRAME_MESSAGE_MAX_SIZE {
             return Err(CodecError::FrameTooLarge(message.len()));
@@ -90,7 +90,7 @@ impl Decoder for Codec {
         let channel_id = uuid::Uuid::from_slice(
             &src[FRAME_LENGTH_HEADER_SIZE..FRAME_LENGTH_HEADER_SIZE + FRAME_CHANNEL_ID_SIZE],
         )
-        .map_err(|e| CodecError::ChannelIdDeserializationError(e))?;
+        .map_err(CodecError::ChannelIdDeserializationError)?;
 
         let total = FRAME_LENGTH_HEADER_SIZE + FRAME_CHANNEL_ID_SIZE + message_len;
         if src.len() < total {
@@ -101,8 +101,8 @@ impl Decoder for Codec {
 
         src.advance(FRAME_LENGTH_HEADER_SIZE + FRAME_CHANNEL_ID_SIZE);
         let payload = src.split_to(message_len);
-        let message = postcard::from_bytes(&payload)
-            .map_err(|e| CodecError::MessageDeserializationError(e))?;
+        let message =
+            postcard::from_bytes(&payload).map_err(CodecError::MessageDeserializationError)?;
 
         Ok(Some(Frame {
             channel_id,

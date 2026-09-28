@@ -203,11 +203,11 @@ pub enum ExitStatus {
     Signal,
 }
 
-impl ToString for ExitStatus {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for ExitStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            ExitStatus::Code(code) => code.to_string(),
-            ExitStatus::Signal => "signal".to_string(),
+            ExitStatus::Code(code) => write!(f, "{}", code),
+            ExitStatus::Signal => f.write_str("signal"),
         }
     }
 }

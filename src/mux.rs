@@ -566,8 +566,8 @@ where
         let channel_closed = CancellationToken::new();
 
         let open_channel = OpenChannel {
-            channel_id: channel_id.clone(),
-            channel_type: channel_type.clone(),
+            channel_id,
+            channel_type,
             status: OpenChannelStatus::NotAwaitingCloseResponse,
             message_tx,
             channel_closed: channel_closed.clone(),
@@ -926,6 +926,7 @@ mod test {
                 tokio::spawn(async move {
                     let _ = (channel_sender_a, channel_receiver_a, _notify);
                 })
+                .await
             });
         }
 

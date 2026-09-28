@@ -185,7 +185,7 @@ impl AsyncWrite for ChannelPollSender {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let n = buf.len().min(MAX_FRAME_SIZE);
-        let channel_id = self.channel_id.clone();
+        let channel_id = self.channel_id;
 
         match self.poll_reserve(cx) {
             Poll::Ready(Ok(())) => {
@@ -196,10 +196,10 @@ impl AsyncWrite for ChannelPollSender {
 
                 match self.send_item(frame) {
                     Ok(_) => Poll::Ready(Ok(n)),
-                    Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+                    Err(e) => Poll::Ready(Err(io::Error::other(e))),
                 }
             }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -212,7 +212,7 @@ impl AsyncWrite for ChannelPollSender {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         // Half-close: tell the mux task this side is done writing.
         let (reply_tx, _reply_rx) = oneshot::channel();
-        let _ = self.command_tx.send(Command::CloseChannel {
+        let _ = self.command_tx.try_send(Command::CloseChannel {
             channel_id: self.channel_id,
             reply_tx,
         });
@@ -265,21 +265,21 @@ impl Drop for ChannelReceiver {
         );
 
         let command_tx = self.command_tx.clone();
-        let channel_id = self.channel_id.clone();
+        let channel_id = self.channel_id;
 
         tokio::spawn(async move {
             let (reply_tx, _reply_rx) = oneshot::channel();
 
-            if let Err(_) = command_tx
+            if command_tx
                 .send(Command::CloseChannel {
                     channel_id,
                     reply_tx,
                 })
                 .await
+                .is_err()
             {
                 tracing::info!(
-                    "Unable to send close command for channel_id [{}] because mux task has already terminated.",
-                    channel_id,
+                    "Unable to send close command for channel_id [{channel_id}] because mux task has already terminated.",
                 );
             }
         });

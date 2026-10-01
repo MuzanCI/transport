@@ -124,6 +124,7 @@ impl std::ops::Deref for RunnerId {
     PartialEq,
     Eq,
     Hash,
+    Default,
     Serialize,
     Deserialize,
     sqlx::Type
@@ -246,6 +247,7 @@ pub enum EvaluatorMessage {
     PartialEq,
     Eq,
     Hash,
+    Default,
     Serialize,
     Deserialize,
     sqlx::Type

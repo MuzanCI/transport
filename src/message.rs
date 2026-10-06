@@ -27,6 +27,7 @@ pub enum Message {
     Evaluator(EvaluatorMessage),
     WorkerScheduler(WorkerSchedulerMessage),
     Worker(WorkerMessage),
+    WorkerKiller(WorkerKillerMessage),
     DebuggerScheduler(DebuggerSchedulerMessage),
     Debugger(DebuggerMessage),
     DebuggerTunnel(DebuggerTunnelMessage),
@@ -179,7 +180,9 @@ pub struct WaitingTrigger {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EvaluatorSchedulerMessage {
-    FetchWaitingTriggersRequest,
+    FetchWaitingTriggersRequest {
+        runner_id: RunnerId,
+    },
     FetchWaitingTriggersResponse {
         result: Result<Vec<WaitingTrigger>, String>,
     },
@@ -201,14 +204,14 @@ pub enum ProcessOutput {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ExitStatus {
     Code(i32),
-    Signal,
+    Signal(i32),
 }
 
 impl std::fmt::Display for ExitStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            ExitStatus::Code(code) => write!(f, "{}", code),
-            ExitStatus::Signal => f.write_str("signal"),
+            ExitStatus::Code(code) => write!(f, "exit code {}", code),
+            ExitStatus::Signal(signal) => write!(f, "signal {}", signal),
         }
     }
 }
@@ -311,7 +314,9 @@ pub struct TaskConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerSchedulerMessage {
     // TODO: Enrich fetch with filters like capabilities and capacity.
-    FetchWaitingTasksRequest,
+    FetchWaitingTasksRequest {
+        runner_id: RunnerId,
+    },
     FetchWaitingTasksResponse {
         result: Result<Vec<WaitingTask>, String>,
     },
@@ -343,7 +348,6 @@ pub enum WorkerMessage {
     FailTaskRequest {
         runner_id: RunnerId,
         task_id: TaskId,
-        reason: String,
     },
     FailTaskResponse {
         result: Result<(), String>,
@@ -387,6 +391,32 @@ pub enum WorkerMessage {
     },
 }
 
+#[derive(
+    Clone,
+    Debug,
+    strum::EnumString,
+    strum::Display,
+    strum::AsRefStr,
+    Serialize,
+    Deserialize
+)]
+pub enum KillReason {
+    Interrupt,
+    Cancel,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WorkerKillerMessage {
+    PollRequest {
+        runner_id: RunnerId,
+        task_id: TaskId,
+    },
+    PollResponse {
+        reason: KillReason,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitingDebugSession {
     pub debug_session_id: DebugSessionId,
@@ -395,7 +425,9 @@ pub struct WaitingDebugSession {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebuggerSchedulerMessage {
     // TODO: Enrich fetch with filters like capabilities and capacity.
-    FetchWaitingDebugSessionsRequest,
+    FetchWaitingDebugSessionsRequest {
+        runner_id: RunnerId,
+    },
     FetchWaitingDebugSessionsResponse {
         result: Result<Vec<WaitingDebugSession>, String>,
     },
@@ -410,8 +442,13 @@ pub enum DebuggerSchedulerMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebuggerMessage {
-    ConnectDebuggerRequest { debug_session_id: DebugSessionId },
-    ConnectDebuggerResponse { result: Result<(), String> },
+    ConnectDebuggerRequest {
+        runner_id: RunnerId,
+        debug_session_id: DebugSessionId,
+    },
+    ConnectDebuggerResponse {
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -454,8 +491,13 @@ pub enum DebugClientMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DebuggerTunnelMessage {
-    CreateDebugTunnelRequest { debug_session_id: DebugSessionId },
-    CreateDebugTunnelResponse { result: Result<(), String> },
+    CreateDebugTunnelRequest {
+        runner_id: RunnerId,
+        debug_session_id: DebugSessionId,
+    },
+    CreateDebugTunnelResponse {
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

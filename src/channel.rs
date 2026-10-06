@@ -53,6 +53,9 @@ pub enum ChannelType {
     /// A worker channel. Initiated by a runner.
     Worker,
 
+    /// A worker killer channel. Initiated by a runner.
+    WorkerKiller,
+
     /// A debugger scheduler channel. Initiated by a runner.
     DebuggerScheduler,
 

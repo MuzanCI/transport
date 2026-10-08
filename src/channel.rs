@@ -47,6 +47,9 @@ pub enum ChannelType {
     /// An evaluator channel. Initiated by a runner.
     Evaluator,
 
+    /// An evaluator killer channel. Initiated by a runner.
+    EvaluatorKiller,
+
     /// A worker scheduler channel. Initiated by a runner.
     WorkerScheduler,
 

@@ -25,11 +25,13 @@ pub enum Message {
     Control(ControlMessage),
     EvaluatorScheduler(EvaluatorSchedulerMessage),
     Evaluator(EvaluatorMessage),
+    EvaluatorKiller(EvaluatorKillerMessage),
     WorkerScheduler(WorkerSchedulerMessage),
     Worker(WorkerMessage),
     WorkerKiller(WorkerKillerMessage),
     DebuggerScheduler(DebuggerSchedulerMessage),
     Debugger(DebuggerMessage),
+    DebuggerKiller(DebuggerKillerMessage),
     DebuggerTunnel(DebuggerTunnelMessage),
     DebugResolver(DebugResolverMessage),
     DebugClient(DebugClientMessage),
@@ -243,6 +245,17 @@ pub enum EvaluatorMessage {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EvaluatorKillerMessage {
+    PollRequest {
+        runner_id: RunnerId,
+        trigger_id: TriggerId,
+    },
+    PollResponse {
+        result: Result<KillReason, String>,
+    },
+}
+
 #[derive(
     Debug,
     Clone,
@@ -413,7 +426,7 @@ pub enum WorkerKillerMessage {
         task_id: TaskId,
     },
     PollResponse {
-        reason: KillReason,
+        result: Result<KillReason, String>,
     },
 }
 
@@ -448,6 +461,17 @@ pub enum DebuggerMessage {
     },
     ConnectDebuggerResponse {
         result: Result<(), String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DebuggerKillerMessage {
+    PollRequest {
+        runner_id: RunnerId,
+        trigger_id: TriggerId,
+    },
+    PollResponse {
+        result: Result<KillReason, String>,
     },
 }
 
